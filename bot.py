@@ -13,7 +13,7 @@ import html as h
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from curl_cffi import requests as cffi
 
@@ -147,6 +147,27 @@ def combined_game_search(keyword: str, limit: int = 10):
     if matched:
         results = matched
     return {'results': results}
+
+
+def _build_bt_detail(detail):
+    """构建 BT 详情：磁力使用 Telegram 原生复制按钮，不能作为 URL。"""
+    lines = [f"🔗 <b>{h.escape(detail.get('title') or '')}</b>"]
+    if detail.get('seeders'):
+        lines.append(f"🌱 做种: {detail['seeders']}")
+    if detail.get('source_label'):
+        lines.append(f"📡 {detail['source_label']}")
+
+    btns = []
+    magnet = detail.get('magnet')
+    if magnet:
+        btns.append([InlineKeyboardButton(
+            '🧲 复制磁力链接',
+            copy_text=CopyTextButton(text=magnet),
+        )])
+    if detail.get('url'):
+        btns.append([InlineKeyboardButton('🌐 原站链接', url=detail['url'])])
+    btns.append([InlineKeyboardButton('↩️ 返回列表', callback_data='page_refresh')])
+    return '\n'.join(lines), InlineKeyboardMarkup(btns)
 
 
 def _download_image(url: str, timeout: int = 15) -> bytes | None:
@@ -292,22 +313,12 @@ async def _render_detail(update, q, detail, st):
                 pass
     else:
         # BT domain
-        lines = [f"🔗 <b>{h.escape(detail.get('title') or '')}</b>"]
-        if detail.get('seeders'):
-            lines.append(f"🌱 做种: {detail['seeders']}")
-        if detail.get('source_label'):
-            lines.append(f"📡 {detail['source_label']}")
-        btns = []
-        if detail.get('magnet'):
-            btns.append([InlineKeyboardButton('🧲 复制磁力链接', url=detail['magnet'])])
-        btns.append([InlineKeyboardButton('🌐 原站链接', url=detail.get('url', ''))])
-        btns.append([InlineKeyboardButton('↩️ 返回列表', callback_data='page_refresh')])
-        kb = InlineKeyboardMarkup(btns)
-        text = '\n'.join(lines)
+        text, kb = _build_bt_detail(detail)
         try:
             await q.edit_message_text(text, parse_mode='HTML', reply_markup=kb)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception('BT 详情渲染失败')
+            await q.edit_message_text(f'❌ 详情显示失败: {h.escape(str(e))}')
 
 
 async def page_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
