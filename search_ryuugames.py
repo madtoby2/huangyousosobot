@@ -5,7 +5,7 @@ import re
 import json
 import html as h
 import base64
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, parse_qs
 from curl_cffi import requests as cffi
 
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
@@ -53,6 +53,63 @@ def _extract_thumb_from_html(html_txt: str) -> str:
     return ''
 
 
+def _is_download_url(url: str) -> bool:
+    """只允许真实网盘/文件托管域名，排除广告短链。"""
+    host = (urlparse(url).hostname or '').lower()
+    allowed = set(HOST_MAP) | {
+        'mega.nz', '1024terabox.com', 'terabox.com', 'akirabox.com',
+        'pixeldrain.com', 'datanodes.to',
+    }
+    return any(host == domain or host.endswith('.' + domain) for domain in allowed)
+
+
+def _resolve_adshrink_url(url: str) -> str:
+    """把 Ryuugames 返回的 AdShrink 短链解析为真实网盘地址。"""
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    short_hosts = {
+        'ashnk.com', 'www.ashnk.com', 'adshnk.com', 'www.adshnk.com',
+        'shrink-service.it', 'www.shrink-service.it',
+    }
+    if host not in short_hosts:
+        return url
+
+    code = parsed.path.rstrip('/').split('/')[-1]
+    if not code:
+        return ''
+    ad_url = f'https://adshnk.com/{code}'
+
+    for _ in range(3):
+        try:
+            r = _sess().post(
+                'https://www.shrink-service.it/v3/api/prototype/init',
+                data={'req': 'init', 'uri': ad_url, 'cookie_bypass_v1': False},
+                headers={'User-Agent': UA, 'Referer': ad_url, 'Origin': 'https://adshnk.com'},
+                timeout=25,
+            )
+            if r.status_code >= 400:
+                continue
+            payload = r.json()
+            item = payload.get('0') or payload.get(0) or {}
+
+            metadata = item.get('metadata') or '{}'
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+            direct = (metadata.get('url') or '').replace('\\/', '/').strip()
+            if direct.startswith('http'):
+                return h.unescape(direct)
+
+            destination = item.get('destination') or ''
+            encoded = parse_qs(urlparse(destination).query).get('v', [''])[0]
+            if encoded:
+                direct = base64.b64decode(encoded + '===').decode('utf-8', 'ignore')
+                if direct.startswith('http'):
+                    return h.unescape(direct)
+        except Exception:
+            continue
+    return ''
+
+
 def _resolve_processing_action(page_url: str, action: dict) -> str:
     try:
         data = {
@@ -76,7 +133,8 @@ def _resolve_processing_action(page_url: str, action: dict) -> str:
         raw = base64.b64decode(host_val + '===').decode('utf-8', 'ignore')
         obj = json.loads(raw)
         link = (obj.get('url') or '').replace('\\/', '/').strip()
-        return h.unescape(link) if link.startswith('http') else ''
+        link = h.unescape(link) if link.startswith('http') else ''
+        return _resolve_adshrink_url(link) if link else ''
     except Exception:
         return ''
 
@@ -160,7 +218,7 @@ def get_detail(url: str):
     label_counts = {}
     for action in actions:
         link = _resolve_processing_action(url, action)
-        if not link:
+        if not link or not _is_download_url(link):
             continue
         label = action.get('label') or 'Download'
         label_counts[label] = label_counts.get(label, 0) + 1
