@@ -156,6 +156,10 @@ def _build_bt_detail(detail):
         lines.append(f"🌱 做种: {detail['seeders']}")
     if detail.get('source_label'):
         lines.append(f"📡 {detail['source_label']}")
+    if detail.get('code'):
+        lines.append(f"🎬 番号: {h.escape(detail['code'])}")
+    if detail.get('release_date'):
+        lines.append(f"📅 发行: {h.escape(detail['release_date'])}")
 
     btns = []
     magnet = detail.get('magnet')
@@ -167,7 +171,9 @@ def _build_bt_detail(detail):
             copy_text=CopyTextButton(text=copyable_magnet),
         )])
     if detail.get('url'):
-        btns.append([InlineKeyboardButton('🌐 原站链接', url=detail['url'])])
+        btns.append([InlineKeyboardButton('🌐 BT 原站', url=detail['url'])])
+    if detail.get('metadata_url'):
+        btns.append([InlineKeyboardButton('🎬 作品资料', url=detail['metadata_url'])])
     btns.append([InlineKeyboardButton('↩️ 返回列表', callback_data='page_refresh')])
     return '\n'.join(lines), InlineKeyboardMarkup(btns)
 
@@ -262,7 +268,7 @@ async def pick_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
             src_mod = search_ryuugames if item.get('source') == 'ryuugames' else search_otomi
             detail = await asyncio.to_thread(src_mod.get_detail, item['url'])
         else:
-            detail = item  # BT results already have magnet
+            detail = await asyncio.to_thread(search_bt.enrich_bt_result, item)
     except Exception as e:
         await q.edit_message_text(f'❌ 详情获取失败: {e}')
         return
@@ -314,13 +320,26 @@ async def _render_detail(update, q, detail, st):
             except Exception:
                 pass
     else:
-        # BT domain
+        # BT domain：有番号封面时发送图片详情卡，匹配不到则保留文字卡。
         text, kb = _build_bt_detail(detail)
+        cover = detail.get('cover') or ''
+        img_bytes = None
+        if cover.startswith('http'):
+            img_bytes = await asyncio.to_thread(_download_image, cover)
         try:
-            await q.edit_message_text(text, parse_mode='HTML', reply_markup=kb)
+            if img_bytes:
+                await q.message.reply_photo(
+                    io.BytesIO(img_bytes), caption=text, parse_mode='HTML', reply_markup=kb
+                )
+                await q.message.delete()
+            else:
+                await q.edit_message_text(text, parse_mode='HTML', reply_markup=kb)
         except Exception as e:
             logger.exception('BT 详情渲染失败')
-            await q.edit_message_text(f'❌ 详情显示失败: {h.escape(str(e))}')
+            try:
+                await q.edit_message_text(text, parse_mode='HTML', reply_markup=kb)
+            except Exception:
+                await q.message.reply_text(f'❌ 详情显示失败: {h.escape(str(e))}')
 
 
 async def page_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
