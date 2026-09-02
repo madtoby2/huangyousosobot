@@ -34,6 +34,8 @@ from wallet_store import WalletStore, PaymentMismatch
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 logger = logging.getLogger('searchbot')
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 OKPAY_SHOP_ID = os.environ.get('OKPAY_SHOP_ID', '')
 OKPAY_API_KEY = os.environ.get('OKPAY_API_KEY', '')
