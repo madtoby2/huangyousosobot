@@ -10,6 +10,8 @@ import io
 import asyncio
 import logging
 import html as h
+import re
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -27,10 +29,17 @@ import search_ryuugames
 import search_otomi
 import search_bt
 import translate
+from okaypay import OkayPayClient, OkayPayError
+from wallet_store import WalletStore, PaymentMismatch
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 logger = logging.getLogger('searchbot')
 
+OKPAY_SHOP_ID = os.environ.get('OKPAY_SHOP_ID', '')
+OKPAY_API_KEY = os.environ.get('OKPAY_API_KEY', '')
+PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', '').rstrip('/')
+WALLET_DB = os.environ.get('WALLET_DB', str(Path(__file__).parent / 'wallet.sqlite3'))
+_wallet_store = WalletStore(WALLET_DB)
 _user_state = {}
 
 
@@ -43,6 +52,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('🎮 黄油搜索', callback_data='domain_ryu')],
         [InlineKeyboardButton('🔍 BT搜索', callback_data='domain_bt')],
+        [InlineKeyboardButton('💰 我的钱包', callback_data='wallet_home')],
     ])
     await update.message.reply_text(
         '👋 欢迎！选择搜索类型：\n\n'
@@ -78,6 +88,7 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('🎮 黄油搜索', callback_data='domain_ryu')],
         [InlineKeyboardButton('🔍 BT搜索', callback_data='domain_bt')],
+        [InlineKeyboardButton('💰 我的钱包', callback_data='wallet_home')],
     ])
     await q.edit_message_text(
         '👋 选择搜索类型：\n\n'
@@ -88,6 +99,161 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _payment_client():
+    if not OKPAY_SHOP_ID or not OKPAY_API_KEY:
+        raise OkayPayError('支付通道尚未配置')
+    return OkayPayClient(OKPAY_SHOP_ID, OKPAY_API_KEY)
+
+
+def _parse_topup_amount(raw: str):
+    value = (raw or '').strip()
+    if not re.fullmatch(r'\d+(?:\.\d{1,8})?', value):
+        return None
+    try:
+        amount = Decimal(value)
+    except InvalidOperation:
+        return None
+    if amount < Decimal('1') or amount > Decimal('10000'):
+        return None
+    return value
+
+
+def format_balance(units: int) -> str:
+    value = f'{Decimal(units) / Decimal(100000000):.8f}'
+    return value.rstrip('0').rstrip('.') or '0'
+
+
+def _wallet_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('➕ 充值 USDT', callback_data='wallet_topup')],
+        [InlineKeyboardButton('↩️ 返回首页', callback_data='back_start')],
+    ])
+
+
+def _create_topup_checkout(tg_user_id, amount, store, client, public_base_url):
+    if not public_base_url.startswith('https://'):
+        raise ValueError('PUBLIC_BASE_URL must use HTTPS')
+    order = store.create_topup(tg_user_id, amount, 'USDT')
+    checkout = client.create_payment(
+        order['order_id'], amount, 'USDT',
+        f"{public_base_url.rstrip('/')}/api/okpay/notify",
+        'SearchBot balance top-up',
+    )
+    return store.attach_provider(order['order_id'], checkout['provider_order_id'],
+                                 checkout['payment_url'])
+
+
+async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = (f'💰 <b>我的钱包</b>\n\n可用余额：'
+            f'<b>{format_balance(_wallet_store.get_balance_units(user_id))} USDT</b>\n\n'
+            '充值到账后可用于付费资源。')
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, parse_mode='HTML',
+                                                       reply_markup=_wallet_keyboard())
+    else:
+        await update.message.reply_text(text, parse_mode='HTML', reply_markup=_wallet_keyboard())
+
+
+async def wallet_topup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _state(q.from_user.id)['awaiting_topup'] = True
+    await q.edit_message_text(
+        '➕ <b>充值 USDT</b>\n\n请输入充值金额（最低 1 USDT，最多 8 位小数）：',
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('取消', callback_data='wallet_home')]]),
+    )
+
+
+async def _handle_topup_message(update, context, amount):
+    st = _state(update.effective_user.id)
+    st.pop('awaiting_topup', None)
+    status = await update.message.reply_text('⏳ 正在创建充值订单…')
+    try:
+        order = await asyncio.to_thread(
+            _create_topup_checkout, update.effective_user.id, amount,
+            _wallet_store, _payment_client(), PUBLIC_BASE_URL,
+        )
+    except Exception as exc:
+        logger.exception('创建充值订单失败')
+        await status.edit_text(f'❌ 创建支付订单失败：{h.escape(str(exc))}', parse_mode='HTML')
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton('💳 前往 OKPay 支付', url=order['payment_url'])],
+        [InlineKeyboardButton('🔄 我已支付，立即查单', callback_data=f"checkpay_{order['order_id']}")],
+        [InlineKeyboardButton('💰 返回钱包', callback_data='wallet_home')],
+    ])
+    await status.edit_text(
+        f'✅ 充值订单已创建\n\n金额：<b>{h.escape(amount)} USDT</b>\n'
+        '有效期：30 分钟\n\n支付完成后系统会自动到账，也可点击下方按钮立即查单。',
+        parse_mode='HTML', reply_markup=kb,
+    )
+
+
+def _verify_topup_order(tg_user_id, order_id, store, client):
+    order = store.get_order(order_id)
+    if not order or order['tg_user_id'] != tg_user_id:
+        raise PaymentMismatch('订单不存在或不属于当前用户')
+    if order['status'] == 'paid':
+        return order, False
+    payment = client.check_payment(order['provider_order_id'])
+    if not payment:
+        return order, None
+    credited = store.credit_verified(payment)
+    return store.get_order(order_id), credited
+
+
+async def check_topup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer('正在查单…')
+    order_id = q.data.split('_', 1)[1]
+    try:
+        order, credited = await asyncio.to_thread(
+            _verify_topup_order, q.from_user.id, order_id, _wallet_store, _payment_client())
+    except Exception as exc:
+        logger.exception('主动查单失败')
+        await q.answer(f'查单失败：{str(exc)[:80]}', show_alert=True)
+        return
+    if credited is None:
+        await q.answer('暂未检测到付款，请稍后重试。', show_alert=True)
+        return
+    await q.edit_message_text(
+        f'✅ 已到账：<b>{h.escape(order["amount_text"])} {order["asset"]}</b>\n'
+        f'当前余额：<b>{format_balance(_wallet_store.get_balance_units(q.from_user.id))} USDT</b>',
+        parse_mode='HTML', reply_markup=_wallet_keyboard())
+
+
+async def _poll_payments(application):
+    while True:
+        try:
+            client = _payment_client()
+            for order in await asyncio.to_thread(_wallet_store.pending_orders):
+                try:
+                    payment = await asyncio.to_thread(client.check_payment, order['provider_order_id'])
+                    if payment and await asyncio.to_thread(_wallet_store.credit_verified, payment):
+                        await application.bot.send_message(
+                            order['tg_user_id'],
+                            f"✅ 充值成功：{order['amount_text']} {order['asset']}\n发送 /wallet 查看余额。")
+                except Exception:
+                    logger.exception('轮询充值订单失败 order=%s', order['order_id'])
+        except Exception:
+            logger.exception('支付轮询器异常')
+        await asyncio.sleep(30)
+
+
+async def _post_init(application):
+    if OKPAY_SHOP_ID and OKPAY_API_KEY:
+        application.bot_data['payment_poll_task'] = asyncio.create_task(_poll_payments(application))
+
+
+async def _post_shutdown(application):
+    task = application.bot_data.get('payment_poll_task')
+    if task:
+        task.cancel()
+
+
 async def do_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """文本消息 -> 搜索"""
     user_id = update.effective_user.id
@@ -96,6 +262,13 @@ async def do_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     st = _state(user_id)
+    if st.get('awaiting_topup'):
+        amount = _parse_topup_amount(keyword)
+        if amount is None:
+            await update.message.reply_text('❌ 金额无效，请输入 1–10000 USDT，最多 8 位小数。')
+            return
+        await _handle_topup_message(update, context, amount)
+        return
     domain = st.get('domain', 'ryu')
 
     status = await update.message.reply_text('🔎 搜索中…')
@@ -366,10 +539,16 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = (Application.builder().token(TOKEN)
+           .post_init(_post_init).post_shutdown(_post_shutdown).build())
 
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_cmd))
+    app.add_handler(CommandHandler('wallet', wallet_cmd))
+    app.add_handler(CommandHandler('balance', wallet_cmd))
+    app.add_handler(CallbackQueryHandler(wallet_cmd, pattern='^wallet_home$'))
+    app.add_handler(CallbackQueryHandler(wallet_topup, pattern='^wallet_topup$'))
+    app.add_handler(CallbackQueryHandler(check_topup, pattern='^checkpay_'))
     app.add_handler(CallbackQueryHandler(domain_select, pattern='^domain_'))
     app.add_handler(CallbackQueryHandler(back_start, pattern='^back_start$'))
     app.add_handler(CallbackQueryHandler(page_nav, pattern='^page_'))

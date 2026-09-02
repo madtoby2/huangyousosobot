@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+import os
+import tempfile
+import unittest
+
+from wallet_store import WalletStore, PaymentMismatch
+
+
+class WalletStoreTests(unittest.TestCase):
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix='.sqlite3')
+        os.close(handle)
+        self.store = WalletStore(self.path)
+
+    def tearDown(self):
+        os.unlink(self.path)
+
+    def test_credit_is_idempotent_across_webhook_and_poll(self):
+        order = self.store.create_topup(123, '2.50000000', 'USDT')
+        self.store.attach_provider(order['order_id'], 'provider-1', 'https://pay.example/1')
+        verified = {'order_id': order['order_id'], 'provider_order_id': 'provider-1',
+                    'coin': 'USDT', 'amount': '2.50000000'}
+        self.assertTrue(self.store.credit_verified(verified))
+        self.assertFalse(self.store.credit_verified(verified))
+        self.assertEqual(self.store.get_balance_units(123), 250000000)
+        self.assertEqual(len(self.store.ledger_for(123)), 1)
+
+    def test_mismatched_amount_coin_or_provider_does_not_credit(self):
+        order = self.store.create_topup(123, '2.5', 'USDT')
+        self.store.attach_provider(order['order_id'], 'provider-1', 'https://pay.example/1')
+        for change in ({'amount': '2.4'}, {'coin': 'TRX'}, {'provider_order_id': 'other'}):
+            payment = {'order_id': order['order_id'], 'provider_order_id': 'provider-1',
+                       'coin': 'USDT', 'amount': '2.5'}
+            payment.update(change)
+            with self.assertRaises(PaymentMismatch):
+                self.store.credit_verified(payment)
+        self.assertEqual(self.store.get_balance_units(123), 0)
+
+    def test_pending_orders_survive_restart(self):
+        order = self.store.create_topup(456, '1', 'USDT')
+        self.store.attach_provider(order['order_id'], 'provider-2', 'https://pay.example/2')
+        reopened = WalletStore(self.path)
+        pending = reopened.pending_orders()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['provider_order_id'], 'provider-2')
+        self.assertEqual(pending[0]['tg_user_id'], 456)
+
+
+if __name__ == '__main__':
+    unittest.main()
