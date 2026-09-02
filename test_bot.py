@@ -23,6 +23,22 @@ class BtDetailTests(unittest.TestCase):
         self.assertEqual(copy_buttons[0].copy_text.text, magnet)
         self.assertFalse(any(button.url and button.url.startswith('magnet:') for button in buttons))
 
+    def test_long_magnet_is_reduced_to_valid_btih_link(self):
+        magnet = (
+            'magnet:?xt=urn:btih:47a51b8012cd969076ae0a3ae7c654'
+            '&dn=' + 'NHDTB-706-' * 30 +
+            '&tr=http%3A%2F%2Ftracker.example%2Fannounce'
+        )
+        _, keyboard = _build_bt_detail({
+            'title': '[Reducing Mosaic] NHDTB-706',
+            'url': 'https://sukebei.nyaa.si/view/123',
+            'magnet': magnet,
+        })
+        copied = keyboard.inline_keyboard[0][0].copy_text.text
+
+        self.assertEqual(copied, 'magnet:?xt=urn:btih:47a51b8012cd969076ae0a3ae7c654')
+        self.assertLessEqual(len(copied), 256)
+
 
 if __name__ == '__main__':
     unittest.main()

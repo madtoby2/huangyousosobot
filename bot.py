@@ -160,9 +160,11 @@ def _build_bt_detail(detail):
     btns = []
     magnet = detail.get('magnet')
     if magnet:
+        # Telegram CopyTextButton 上限 256 字符；xt 哈希本身即可由 BT 客户端解析。
+        copyable_magnet = magnet.split('&', 1)[0]
         btns.append([InlineKeyboardButton(
             '🧲 复制磁力链接',
-            copy_text=CopyTextButton(text=magnet),
+            copy_text=CopyTextButton(text=copyable_magnet),
         )])
     if detail.get('url'):
         btns.append([InlineKeyboardButton('🌐 原站链接', url=detail['url'])])
