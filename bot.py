@@ -574,10 +574,19 @@ async def _render_page(update, status_msg, st):
     btns.append([InlineKeyboardButton('↩️ 返回', callback_data='back_start')])
 
     text = '\n'.join(lines)
+    keyboard = InlineKeyboardMarkup(btns)
+    # Detail cards can be photos. Telegram cannot edit a photo message into a
+    # text-only result list, so send the list first and then remove the card.
+    if not getattr(status_msg, 'text', None):
+        replacement = await status_msg.reply_text(
+            text, parse_mode='HTML', reply_markup=keyboard)
+        await status_msg.delete()
+        return replacement
     try:
-        await status_msg.edit_text(text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(btns))
+        await status_msg.edit_text(text, parse_mode='HTML', reply_markup=keyboard)
     except Exception:
-        await status_msg.edit_text(text[:300], parse_mode='HTML', reply_markup=InlineKeyboardMarkup(btns))
+        await status_msg.edit_text(text[:300], parse_mode='HTML', reply_markup=keyboard)
+    return status_msg
 
 
 async def page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):

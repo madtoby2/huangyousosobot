@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 
-from bot import _build_bt_detail, _render_detail
+from bot import _build_bt_detail, _render_detail, _render_page
 
 
 class BtDetailTests(unittest.TestCase):
@@ -67,6 +67,29 @@ class BtPhotoDetailTests(unittest.IsolatedAsyncioTestCase):
             await _render_detail(None, q, detail, {'domain': 'bt'})
         message.reply_photo.assert_awaited_once()
         message.delete.assert_awaited_once()
+
+
+class ResultPageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_returning_from_photo_detail_replaces_it_with_text_list(self):
+        message = SimpleNamespace(
+            text=None,
+            caption='detail card',
+            reply_text=AsyncMock(),
+            edit_text=AsyncMock(),
+            delete=AsyncMock(),
+        )
+        state = {
+            'domain': 'ryu',
+            'keyword': 'test',
+            'page': 0,
+            'results': [{'title': 'Game One', 'source_label': 'Ryuugames'}],
+        }
+
+        await _render_page(None, message, state)
+
+        message.reply_text.assert_awaited_once()
+        message.delete.assert_awaited_once()
+        message.edit_text.assert_not_awaited()
 
 
 if __name__ == '__main__':
