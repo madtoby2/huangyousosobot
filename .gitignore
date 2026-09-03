@@ -7,3 +7,7 @@ searchbot.service
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
+*.session
+*.session-journal
+.uploader_*
+tg_uploader_*.py

@@ -1,33 +1,55 @@
 # 黄油搜搜 SearchBot
 
-一个 Telegram 搜索与付费下载 Bot，当前支持双域搜索和 OKPay 钱包充值：
+Telegram 搜索与付费下载 Bot：
 
-- 🎮 **黄油搜索** — 成人游戏搜索（Ryuugames / OtomiGames），返回下载镜像直链按钮
-- 🔍 **BT 搜索** — 磁力资源搜索（Sukebei / JavDB），返回磁力链接并支持一键复制
-- 💰 **用户钱包** — 通过 OKPay 充值 USDT，Webhook 与主动查单双通道确认，幂等入账
+- 🎮 黄油搜索：Ryuugames / OtomiGames
+- 🔍 BT 搜索：Sukebei / JavDB，磁力复制与番号封面
+- 💰 OKPay USDT 钱包充值
+- ⚡ 余额付费后按需下载、频道缓存、Bot 交付
+- 🖥️ 本地管理面板
 
-## 架构
+## 交互原则
+
+搜索列表保持纯文字；只有点击某条结果下钻后才显示封面、简介和下载操作。
+付费下载不是预先囤文件：用户确认并扣余额后才创建下载任务。
 
 ```text
-bot.py                  # 主程序：双域路由、分页、详情卡片、钱包与充值交互
-search_ryuugames.py     # Ryuugames 实时搜索、processing/AdShrink 最终下载地址解析
-search_otomi.py         # OtomiGames 实时搜索
-search_bt.py            # Sukebei BT 搜索 + JavDB 番号、封面和发行信息补充
-translate.py            # 免费翻译（有道 jsonapi_s + MyMemory 兜底）
-okaypay.py              # OKPay HMAC-SHA256 签名、创建支付链接、主动查单
-wallet_store.py         # SQLite 用户余额、充值订单和追加式账本
-webhook_server.py       # OKPay HTTPS 回调：验签、主动复查、幂等入账和到账通知
+查看游戏详情
+→ 点击“付费下载”
+→ 原子扣余额并创建购买快照
+→ 创建或加入该资源的共享下载任务
+→ Bot 直接解析 MediaFire / PixelDrain 并下载
+→ 小号上传私有仓库频道
+→ Bot copyMessage 给所有等待买家
+→ 保存频道消息作为后续缓存
 ```
 
-## 依赖
+同一资源多人同时购买只下载、上传一次。每个下载任务使用带租约（lease）的独立临时目录，崩溃重启后只有过期租约才会被重新排队。下载、上传或单个用户交付失败时使用追加式退款流水，不能直接篡改余额。
 
-```bash
-pip install python-dotenv python-telegram-bot requests beautifulsoup4 curl_cffi httpx
+交付状态机：`copyMessage` 明确被拒绝（如用户屏蔽 Bot）时自动退款一次；网络超时等结果不确定时进入 `manual_review` 待人工核对状态，不自动退款也不重复扣款，管理员可在面板核对后标记已交付或人工退款。
+
+## 文件结构
+
+```text
+bot.py                 Telegram 搜索、钱包、付费按钮和后台 worker
+search_ryuugames.py    Ryuugames 搜索及广告短链最终地址解析
+search_otomi.py        OtomiGames 搜索
+search_bt.py           BT 搜索与 JavDB 元数据补充
+translate.py           简介翻译
+okaypay.py             OKPay 签名、支付链接和主动查单
+webhook_server.py      OKPay 回调验签、复查和幂等入账
+wallet_store.py        SQLite 余额、账本、购买、下载任务和频道缓存
+downloader.py          MediaFire / PixelDrain 直接下载、大小与磁盘校验
+uploader.py            Telethon 小号上传私有频道
+delivery.py            Bot copyMessage 交付及失败退款
+pipeline.py            下载一次、上传一次、批量交付
+artifacts.py           稳定 resource_id
+admin_panel.py         零依赖本地管理面板
 ```
 
 ## 配置
 
-创建 `.env`，不要把真实密钥提交到 Git：
+复制 `.env.example` 为 `.env`，真实密钥和 session 不得提交 Git。
 
 ```dotenv
 BOT_TOKEN=<BotFather token>
@@ -35,77 +57,96 @@ OKPAY_SHOP_ID=<OKPay App ID>
 OKPAY_API_KEY=<OKPay API key>
 PUBLIC_BASE_URL=https://pay.example.com
 WALLET_DB=/opt/searchbot/wallet.sqlite3
+
+GAME_PRICE_UNITS=100000000
+DOWNLOAD_DIR=/opt/searchbot/downloads
+STORAGE_CHANNEL_ID=-1001234567890
+UPLOADER_SESSION=/opt/searchbot/uploader.session
+ADMIN_TOKEN=<至少16字符的随机密码>
 ```
 
-OKPay 回调地址：
+`GAME_PRICE_UNITS` 使用 USDT 的 8 位最小单位：`100000000` 表示 `1 USDT`。
 
-```text
-https://pay.example.com/api/okpay/notify
+## 支持的付费下载源
+
+当前自动选源顺序：
+
+1. MediaFire
+2. PixelDrain
+
+两者已用真实 Ryuugames 结果验证 Range 下载。Mega、Datanodes、Terabox 等尚未接入时不会作为付费源，也不会在不支持的情况下扣款。项目不依赖 JDownloader。
+
+下载保护：
+
+- 仅允许明确支持的公网域名，每一跳重定向与最终地址都拒绝内网/回环/链路本地地址
+- DNS 解析结果先校验为公网地址再固定到连接层（requests 与 curl_cffi 均逐跳校验、IP 固定，消除 DNS rebinding 窗口）
+- 下载前检查 Content-Length、最大文件限制和磁盘余量；无长度时按最大上限预留
+- 流式下载中持续检查磁盘余量达到保留阈值即中止
+- 流式下载到 `.part`，完成后原子改名
+- 校验实际字节数并计算 SHA-256
+- 上传频道后删除宿主机临时文件
+
+## 支付和账本
+
+- OKPay Webhook 不直接入账，必须验签后主动查单
+- 金额全程使用字符串或整数最小单位，不使用浮点数
+- 充值、购买和退款均写入追加式 `balance_ledger`
+- 用户重复点击不重复扣款
+- 同一资源只存在一个活跃下载任务
+- 下载失败时给所有等待买家各退款一次
+- `copyMessage` 失败只退款该买家，不破坏已完成频道缓存
+- 结果不确定的交付进入待人工核对，不自动退款
+- 资源身份包含版本与下载地址，页面改版不会让买家收到旧缓存文件
+
+## 管理面板
+
+面板默认只监听本机：
+
+```bash
+ADMIN_TOKEN='your-random-password' \
+  ./venv/bin/python admin_panel.py --host 127.0.0.1 --port 8780
 ```
 
-生产环境应通过 Caddy/Nginx 将该路径反向代理到：
+浏览器访问 `http://127.0.0.1:8780`，HTTP Basic Auth 用户名为 `admin`，密码为 `ADMIN_TOKEN`。
 
-```text
-127.0.0.1:8765
-```
+面板包含：
+
+- 用户与余额
+- 资源缓存状态
+- 下载任务
+- 购买、交付和退款
+- 待交付订单人工退款（仍使用唯一追加式退款流水）
+- 待人工核对订单：核对后标记已交付或确认未交付并退款
+
+生产部署模板：`searchbot-admin.service.example`。需要公网访问时应放在 HTTPS 反向代理和额外访问控制之后，不应直接监听公网地址。
 
 ## 运行
 
 ```bash
-python bot.py
-python webhook_server.py
+./venv/bin/python bot.py
+./venv/bin/python webhook_server.py
+./venv/bin/python admin_panel.py --host 127.0.0.1 --port 8780
 ```
 
-## 部署（systemd）
+Bot 只有在 `STORAGE_CHANNEL_ID`、已授权的小号 session 和上传认证状态全部存在时才启用付费下载 worker；否则付费按钮点击会明确提示未就绪，并且不会扣款。
+
+## 测试
 
 ```bash
-sudo cp searchbot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now searchbot
-sudo systemctl enable --now searchbot-webhook
+PYTHONWARNINGS=error::ResourceWarning ./venv/bin/python -m unittest discover -v
 ```
 
-## 已完成功能
+覆盖 OKPay、钱包、共享下载任务、重复点击、余额不足、批量退款、直接下载、频道上传、Bot 复制交付、队列重启持久化和管理面板鉴权。
 
-- 搜索结果纯文字列表，每页 8 条
-- 点击结果后展示封面、简介和下载操作
-- Ryuugames + Otomi 多源聚合及标题相关度过滤
-- Ryuugames 广告短链二次解析，只保留真实网盘最终地址
-- Sukebei 磁力搜索及 Telegram 原生复制按钮
-- JavDB 精确番号匹配、封面和发行信息补充
-- `/start` 钱包入口、`/wallet` 余额查询和 USDT 充值
-- OKPay 请求/响应签名验证
-- HTTPS Webhook 验签后再次主动查单
-- Webhook 与轮询共用幂等入账函数，避免重复充值
-- SQLite 余额缓存与追加式充值账本
-- 到账 Telegram 通知
+## 尚待真实 E2E
 
-## 下一步需求：黄油付费下载
+小号 session 准备完成后：
 
-目标是在黄油详情页增加“余额购买并由 Bot 直接发送文件”，免费镜像下载继续保留。
+1. 加入私有仓库频道并读取真实 `STORAGE_CHANNEL_ID`
+2. 将 Bot 加为频道管理员并关闭内容保护
+3. 用一个代表性文件验证小号上传
+4. 真实执行 `copyMessage` 到买家账号
+5. 用小额余额完整验证扣款 → 下载 → 上传 → 交付
+6. 验证失败退款与服务重启恢复
 
-计划流程：
-
-```text
-搜索黄油 → 查看详情 → 选择付费下载
-→ 检查资源文件、价格和用户余额
-→ 数据库事务内扣款并创建购买记录
-→ Bot 直接发送游戏文件
-→ 发送成功后记录 Telegram message_id
-→ 终局发送失败时生成唯一退款流水，余额原路退回
-```
-
-实施要求：
-
-- 为每个可售资源建立稳定 `resource_id`、文件路径、版本、价格和文件大小快照
-- 购买扣款、购买记录和账本流水必须在同一数据库事务完成
-- 余额不足不得创建扣款流水
-- 文件交付在事务提交后执行，避免长时间占用数据库锁
-- 发送失败只能通过追加 `refund` 流水退款，不能直接篡改余额
-- 同一购买只能成功退款一次
-- 扣款前验证文件存在、可读且大小符合 Telegram 实际上传通道限制
-- 大文件优先使用本地 Telegram Bot API；超限资源应在扣款前拒绝或采用已验证的分卷方案
-- 详情页保留免费网盘按钮，并新增价格明确的付费下载按钮
-- 全流程采用 TDD，并进行真实 Telegram 文件交付 E2E
-
-> ⚠️ 仅用于个人学习与技术验证，请遵守当地法律法规及相关平台规则。
+> 仅用于个人学习与技术验证，请遵守当地法律法规及相关平台规则。

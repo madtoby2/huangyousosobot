@@ -13,6 +13,7 @@ import html as h
 import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton
@@ -30,7 +31,12 @@ import search_otomi
 import search_bt
 import translate
 from okaypay import OkayPayClient, OkayPayError
-from wallet_store import WalletStore, PaymentMismatch
+from wallet_store import (InsufficientBalance, WalletStore, PaymentMismatch)
+from artifacts import game_resource_id
+from delivery import DeliveryFailed, deliver_purchase
+from downloader import download_game_url
+from pipeline import cleanup_stale_job_dirs, process_download_job
+from uploader import UploaderUnavailable, build_telethon_uploader
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 logger = logging.getLogger('searchbot')
@@ -101,6 +107,63 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _delivery_configured():
+    channel = os.environ.get('STORAGE_CHANNEL_ID', '').strip()
+    session_path = Path(os.environ.get(
+        'UPLOADER_SESSION', str(Path(__file__).parent / 'uploader_351961666576.session')))
+    auth_path = Path(__file__).parent / '.uploader_auth.json'
+    if not channel or not session_path.exists() or not auth_path.exists():
+        return False
+    try:
+        import json
+        return bool(json.loads(auth_path.read_text()).get('authorized'))
+    except Exception:
+        return False
+
+
+async def buy_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    if not _delivery_configured():
+        await q.message.reply_text('⚠️ 付费下载暂未就绪，不会扣款。')
+        return
+    resource_id = q.data.split('_', 1)[1]
+    offer = _state(user_id).get('paid_offers', {}).get(resource_id)
+    if not offer:
+        await q.message.reply_text('❌ 下载信息已过期，请重新打开游戏详情。')
+        return
+    try:
+        purchase, charged, job_created = await asyncio.to_thread(
+            _wallet_store.create_download_purchase, user_id, offer)
+    except InsufficientBalance:
+        await q.message.reply_text(
+            f"❌ 余额不足，需要 {format_balance(offer['price_units'])} USDT。",
+            reply_markup=_wallet_keyboard())
+        return
+    resource = _wallet_store.get_resource(resource_id)
+    if resource and resource['cache_status'] == 'ready':
+        try:
+            outcome = await deliver_purchase(_wallet_store, context.application.bot,
+                                             purchase['purchase_id'])
+        except DeliveryFailed:
+            await q.message.reply_text('❌ 文件交付失败，已自动退款。')
+            return
+        if outcome['delivered_now']:
+            await q.message.reply_text(
+                f"✅ 文件发送成功，余额 {format_balance(_wallet_store.get_balance_units(user_id))} USDT。")
+        else:
+            await q.message.reply_text('✅ 该资源此前已经交付。')
+        return
+    if charged:
+        state = '已创建下载队列任务' if job_created else '已加入现有下载队列任务'
+        await q.message.reply_text(
+            f"✅ 已扣款 {format_balance(offer['price_units'])} USDT，{state}。\n"
+            '⏳ 文件下载、上传完成后会自动发送；失败将自动退款。')
+    else:
+        await q.message.reply_text('⏳ 该资源已有下载队列任务，不会重复扣款。')
+
+
 def _payment_client():
     if not OKPAY_SHOP_ID or not OKPAY_API_KEY:
         raise OkayPayError('支付通道尚未配置')
@@ -123,6 +186,48 @@ def _parse_topup_amount(raw: str):
 def format_balance(units: int) -> str:
     value = f'{Decimal(units) / Decimal(100000000):.8f}'
     return value.rstrip('0').rstrip('.') or '0'
+
+
+def _select_paid_offer(detail, price_units, store=None):
+    priorities = ('mediafire.com', 'pixeldrain.com')
+    selected = None
+    for wanted in priorities:
+        for button in detail.get('download_buttons', []):
+            host = (urlsplit(button.get('url', '')).hostname or '').lower()
+            if host == wanted or host.endswith('.' + wanted):
+                selected = button
+                break
+        if selected:
+            break
+    if not selected:
+        return None
+    source = detail.get('source', '')
+    source_url = detail.get('url', '')
+    try:
+        version = detail.get('version') or detail.get('info_title') or 'unknown'
+        resource_id = game_resource_id(source, source_url, version, selected['url'])
+    except ValueError:
+        return None
+    if store:
+        existing = store.get_resource(resource_id)
+        if existing:
+            price_units = existing['price_units']
+    return {
+        'resource_id': resource_id,
+        'title': detail.get('title') or 'Untitled game',
+        'source': source,
+        'source_url': source_url,
+        'download_url': selected['url'],
+        'version': version,
+        'price_units': int(price_units),
+    }
+
+
+def _paid_download_button(offer):
+    return InlineKeyboardButton(
+        f"⚡ {format_balance(offer['price_units'])} USDT · 付费下载",
+        callback_data=f"buy_{offer['resource_id']}",
+    )
 
 
 def _wallet_keyboard():
@@ -245,15 +350,79 @@ async def _poll_payments(application):
         await asyncio.sleep(30)
 
 
+async def _download_worker(application):
+    try:
+        uploader = build_telethon_uploader()
+    except UploaderUnavailable:
+        logger.exception('付费下载上传器未就绪')
+        return
+    work_dir = os.environ.get('DOWNLOAD_DIR', str(Path(__file__).parent / 'downloads'))
+    await asyncio.to_thread(cleanup_stale_job_dirs, work_dir)
+    while True:
+        try:
+            await asyncio.to_thread(_wallet_store.reset_interrupted_downloads)
+            for pending in await asyncio.to_thread(_wallet_store.ready_pending_purchases, 20):
+                try:
+                    await deliver_purchase(_wallet_store, application.bot, pending['purchase_id'])
+                except DeliveryFailed:
+                    logger.exception('缓存资源交付失败 purchase=%s', pending['purchase_id'])
+            jobs = await asyncio.to_thread(_wallet_store.queued_download_jobs, 1)
+            if not jobs:
+                await asyncio.sleep(5)
+                continue
+            job = jobs[0]
+            waiting = await asyncio.to_thread(
+                _wallet_store.pending_purchases_for_resource, job['resource_id'])
+            status_messages = {}
+            for purchase in waiting:
+                try:
+                    status_messages[purchase['tg_user_id']] = await application.bot.send_message(
+                        purchase['tg_user_id'], '⏬ 付费资源开始下载…')
+                except Exception:
+                    logger.exception('下载进度通知发送失败 user=%s', purchase['tg_user_id'])
+
+            async def update_stage(stage, data=None):
+                texts = {
+                    'downloading': '⏬ 正在下载付费资源…',
+                    'uploading': '☁️ 下载完成，正在上传 Telegram…',
+                    'delivering': '📦 上传完成，正在发送文件…',
+                    'ready': '✅ 文件交付流程已完成。',
+                    'manual_review': '⚠️ Telegram 返回结果不确定，订单已转人工核对，不会重复扣款或自动退款。',
+                    'failed': '❌ 文件下载或上传失败，费用已自动退款。',
+                }
+                text = texts.get(stage)
+                if not text:
+                    return
+                for user_id, message in status_messages.items():
+                    try:
+                        await message.edit_text(text)
+                    except Exception:
+                        logger.exception('进度更新失败 user=%s stage=%s', user_id, stage)
+
+            await process_download_job(
+                _wallet_store, job['job_id'], download_game_url, uploader,
+                application.bot, work_dir, stage_callback=update_stage)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception('付费下载 worker 异常')
+            await asyncio.sleep(10)
+
+
 async def _post_init(application):
     if OKPAY_SHOP_ID and OKPAY_API_KEY:
         application.bot_data['payment_poll_task'] = asyncio.create_task(_poll_payments(application))
+    if _delivery_configured():
+        await asyncio.to_thread(_wallet_store.reset_interrupted_downloads)
+        await asyncio.to_thread(_wallet_store.reset_interrupted_deliveries)
+        application.bot_data['download_task'] = asyncio.create_task(_download_worker(application))
 
 
 async def _post_shutdown(application):
-    task = application.bot_data.get('payment_poll_task')
-    if task:
-        task.cancel()
+    for key in ('payment_poll_task', 'download_task'):
+        task = application.bot_data.get(key)
+        if task:
+            task.cancel()
 
 
 async def do_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -469,6 +638,11 @@ async def _render_detail(update, q, detail, st):
             desc_t = await asyncio.to_thread(translate.translate_to_chinese, detail['desc'])
             lines.append(f"\n💬 {h.escape(desc_t[:300])}")
         btns = []
+        price_units = int(os.environ.get('GAME_PRICE_UNITS', '100000000'))
+        offer = _select_paid_offer(detail, price_units, _wallet_store)
+        if offer:
+            st.setdefault('paid_offers', {})[offer['resource_id']] = offer
+            btns.append([_paid_download_button(offer)])
         for b in detail.get('download_buttons', [])[:8]:
             btns.append([InlineKeyboardButton(f'⬇️ {b["label"]}', url=b['url'])])
         if not btns:
@@ -551,6 +725,7 @@ def main():
     app.add_handler(CallbackQueryHandler(wallet_cmd, pattern='^wallet_home$'))
     app.add_handler(CallbackQueryHandler(wallet_topup, pattern='^wallet_topup$'))
     app.add_handler(CallbackQueryHandler(check_topup, pattern='^checkpay_'))
+    app.add_handler(CallbackQueryHandler(buy_download, pattern='^buy_'))
     app.add_handler(CallbackQueryHandler(domain_select, pattern='^domain_'))
     app.add_handler(CallbackQueryHandler(back_start, pattern='^back_start$'))
     app.add_handler(CallbackQueryHandler(page_nav, pattern='^page_'))

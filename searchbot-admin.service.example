@@ -1,0 +1,15 @@
+[Unit]
+Description=SearchBot local admin panel
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/searchbot
+EnvironmentFile=/opt/searchbot/.env
+ExecStart=/opt/searchbot/venv/bin/python /opt/searchbot/admin_panel.py --host 127.0.0.1 --port 8780
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
