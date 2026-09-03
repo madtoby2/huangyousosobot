@@ -3,10 +3,10 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from bot import (_create_topup_checkout, _parse_topup_amount, _wallet_keyboard,
-                 format_balance, start)
+                 format_balance, start, topup_cmd)
 from wallet_store import WalletStore
 
 
@@ -50,6 +50,36 @@ class WalletBotTests(unittest.IsolatedAsyncioTestCase):
         keyboard = message.reply_text.await_args.kwargs['reply_markup']
         buttons = [button for row in keyboard.inline_keyboard for button in row]
         self.assertTrue(any(button.callback_data == 'wallet_home' for button in buttons))
+
+    async def test_topup_command_without_amount_prompts_for_usdt_amount(self):
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=987654), message=message)
+        context = SimpleNamespace(args=[])
+
+        await topup_cmd(update, context)
+
+        text = message.reply_text.await_args.args[0]
+        self.assertIn('充值 USDT', text)
+        self.assertIn('最低 1 USDT', text)
+
+    async def test_topup_command_with_amount_creates_checkout(self):
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=987655), message=message)
+        context = SimpleNamespace(args=['2.5'])
+
+        with patch('bot._handle_topup_message', new=AsyncMock()) as handler:
+            await topup_cmd(update, context)
+
+        handler.assert_awaited_once_with(update, context, '2.5')
+
+    async def test_topup_command_rejects_invalid_amount(self):
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_user=SimpleNamespace(id=987656), message=message)
+        context = SimpleNamespace(args=['0.5'])
+
+        await topup_cmd(update, context)
+
+        self.assertIn('金额无效', message.reply_text.await_args.args[0])
 
 
 if __name__ == '__main__':

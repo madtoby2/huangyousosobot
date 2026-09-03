@@ -274,6 +274,25 @@ async def wallet_topup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def topup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Create a USDT checkout directly with /topup AMOUNT or prompt for it."""
+    raw = ' '.join(getattr(context, 'args', None) or []).strip()
+    if raw:
+        amount = _parse_topup_amount(raw)
+        if amount is None:
+            await update.message.reply_text(
+                '❌ 金额无效，请输入 1–10000 USDT，最多 8 位小数。')
+            return
+        await _handle_topup_message(update, context, amount)
+        return
+    _state(update.effective_user.id)['awaiting_topup'] = True
+    await update.message.reply_text(
+        '➕ <b>充值 USDT</b>\n\n请输入充值金额（最低 1 USDT，最多 8 位小数）：',
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('取消', callback_data='wallet_home')]]),
+    )
+
+
 async def _handle_topup_message(update, context, amount):
     st = _state(update.effective_user.id)
     st.pop('awaiting_topup', None)
@@ -717,7 +736,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '1. 发送 /start 选择搜索域\n'
         '2. 输入关键词搜索，结果列表点选\n'
         '3. 点结果查看详情（带封面图+简介）\n'
-        '4. 黄油：下载按钮直达镜像；BT：磁力一键复制\n\n'
+        '4. 黄油：下载按钮直达镜像；BT：磁力一键复制\n'
+        '5. /topup 金额：创建 USDT 充值订单\n\n'
         '💡 提示：BT 搜索直接输入番号 (如 MIDV-726) 更快~',
         parse_mode='HTML',
     )
@@ -731,6 +751,9 @@ def main():
     app.add_handler(CommandHandler('help', help_cmd))
     app.add_handler(CommandHandler('wallet', wallet_cmd))
     app.add_handler(CommandHandler('balance', wallet_cmd))
+    app.add_handler(CommandHandler('topup', topup_cmd))
+    app.add_handler(CommandHandler('recharge', topup_cmd))
+    app.add_handler(CommandHandler('deposit', topup_cmd))
     app.add_handler(CallbackQueryHandler(wallet_cmd, pattern='^wallet_home$'))
     app.add_handler(CallbackQueryHandler(wallet_topup, pattern='^wallet_topup$'))
     app.add_handler(CallbackQueryHandler(check_topup, pattern='^checkpay_'))
