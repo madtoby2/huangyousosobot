@@ -26,7 +26,7 @@ def cleanup_stale_job_dirs(work_dir, *, older_than_seconds=86400, now=None):
 
 
 async def process_download_job(store, job_id, download_callable, uploader, bot, work_dir,
-                               progress=None, stage_callback=None):
+                               progress=None, stage_callback=None, prepare_callable=None):
     job = store.claim_download(job_id)
     if not job:
         current = store.get_job(job_id)
@@ -49,6 +49,11 @@ async def process_download_job(store, job_id, download_callable, uploader, bot, 
             if progress: progress(written, expected)
         result = await asyncio.to_thread(download_callable, resource['download_url'], job_dir,
                                          progress=heartbeat_progress)
+        if prepare_callable:
+            await stage('preparing', result)
+            prepared = await asyncio.to_thread(
+                prepare_callable, result['path'], resource['source'])
+            result = {**result, **prepared}
         local_path = result['path']
         store.mark_uploading(job_id, local_path, lease_token)
         await stage('uploading', result)

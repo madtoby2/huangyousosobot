@@ -32,6 +32,7 @@ import search_bt
 import translate
 from okaypay import OkayPayClient, OkayPayError
 from wallet_store import (InsufficientBalance, WalletStore, PaymentMismatch)
+from archive_processor import passwords_for_source, prepare_archive
 from artifacts import game_resource_id
 from delivery import DeliveryFailed, deliver_purchase
 from downloader import download_game_url
@@ -105,6 +106,10 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML',
         reply_markup=kb,
     )
+
+
+def _prepare_paid_archive(path: str, source: str):
+    return prepare_archive(path, passwords_for_source(source))
 
 
 def _delivery_configured():
@@ -403,7 +408,8 @@ async def _download_worker(application):
             async def update_stage(stage, data=None):
                 texts = {
                     'downloading': '⏬ 正在下载付费资源…',
-                    'uploading': '☁️ 下载完成，正在上传 Telegram…',
+                    'preparing': '🔓 下载完成，正在解密并重包为无密码 ZIP…',
+                    'uploading': '☁️ 解密重包完成，正在上传 Telegram…',
                     'delivering': '📦 上传完成，正在发送文件…',
                     'ready': '✅ 文件交付流程已完成。',
                     'manual_review': '⚠️ Telegram 返回结果不确定，订单已转人工核对，不会重复扣款或自动退款。',
@@ -420,7 +426,8 @@ async def _download_worker(application):
 
             await process_download_job(
                 _wallet_store, job['job_id'], download_game_url, uploader,
-                application.bot, work_dir, stage_callback=update_stage)
+                application.bot, work_dir, stage_callback=update_stage,
+                prepare_callable=_prepare_paid_archive)
         except asyncio.CancelledError:
             raise
         except Exception:

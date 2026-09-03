@@ -97,4 +97,35 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get_balance_units(202),200000000)
 
 
+    async def test_prepares_archive_before_upload(self):
+        prepared_calls = []
+        def fake_download(url, destination_dir, progress=None):
+            path = Path(destination_dir) / 'source.rar'
+            path.write_bytes(b'encrypted-source')
+            return {'path': str(path), 'file_size': path.stat().st_size,
+                    'checksum': 'sha256:source', 'final_url': url}
+        def fake_prepare(path, source):
+            prepared_calls.append((path, source))
+            output = Path(path).with_name('game_decrypted.zip')
+            output.write_bytes(b'plain-zip')
+            return {'path': str(output), 'file_size': output.stat().st_size,
+                    'checksum': 'sha256:plain'}
+        uploader, bot = FakeUploader(), FakeBot()
+        stages = []
+        async def stage(name, data=None): stages.append(name)
+
+        result = await process_download_job(
+            self.store, self.job['job_id'], fake_download, uploader, bot,
+            self.tmp.name, stage_callback=stage, prepare_callable=fake_prepare)
+
+        self.assertEqual(len(prepared_calls), 1)
+        self.assertEqual(prepared_calls[0][1], 'ryuugames')
+        self.assertTrue(uploader.calls[0][0].endswith('game_decrypted.zip'))
+        resource = self.store.get_resource(self.resource_id)
+        self.assertEqual(resource['checksum'], 'sha256:plain')
+        self.assertEqual(stages, ['downloading', 'preparing', 'uploading',
+                                  'delivering', 'ready'])
+        self.assertEqual(result['delivered'], 2)
+
+
 if __name__=='__main__': unittest.main()
