@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from bot import _paid_download_button, _select_paid_offer
+from bot import (_download_price_units, _paid_download_button,
+                 _select_paid_offer)
 
 
 class PaidUiTests(unittest.TestCase):
+    def test_default_game_and_bt_download_price_is_point_one_usdt(self):
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(_download_price_units('game'), 10_000_000)
+            self.assertEqual(_download_price_units('bt'), 10_000_000)
+
     def detail(self, buttons):
         return {'title':'Test Game','source':'ryuugames','url':'https://ryuugames.com/test/',
                 'version':'1.0','download_buttons':buttons}

@@ -209,6 +209,18 @@ def format_balance(units: int) -> str:
     return value.rstrip('0').rstrip('.') or '0'
 
 
+def _download_price_units(kind: str) -> int:
+    default = '10000000'
+    if str(kind).lower() == 'bt':
+        value = os.environ.get('BT_PRICE_UNITS', os.environ.get('GAME_PRICE_UNITS', default))
+    else:
+        value = os.environ.get('GAME_PRICE_UNITS', default)
+    units = int(value)
+    if units <= 0:
+        raise ValueError('download price must be positive')
+    return units
+
+
 def _select_paid_offer(detail, price_units, store=None):
     priorities = ('mediafire.com', 'pixeldrain.com')
     selected = None
@@ -716,7 +728,7 @@ async def _render_detail(update, q, detail, st):
             desc_t = await asyncio.to_thread(translate.translate_to_chinese, detail['desc'])
             lines.append(f"\n💬 {h.escape(desc_t[:300])}")
         btns = []
-        price_units = int(os.environ.get('GAME_PRICE_UNITS', '100000000'))
+        price_units = _download_price_units('game')
         offer = _select_paid_offer(detail, price_units, _wallet_store)
         if offer:
             st.setdefault('paid_offers', {})[offer['resource_id']] = offer
@@ -748,8 +760,7 @@ async def _render_detail(update, q, detail, st):
                 pass
     else:
         # BT domain：有番号封面时发送图片详情卡，匹配不到则保留文字卡。
-        bt_price_units = int(os.environ.get(
-            'BT_PRICE_UNITS', os.environ.get('GAME_PRICE_UNITS', '100000000')))
+        bt_price_units = _download_price_units('bt')
         offer = _select_bt_offer(detail, bt_price_units, _wallet_store)
         if offer:
             st.setdefault('paid_offers', {})[offer['resource_id']] = offer
