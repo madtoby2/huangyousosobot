@@ -40,7 +40,12 @@ def sign_payload(payload: dict, api_key: str) -> str:
 
 
 def decimal_to_units(value: str, decimals: int = 8) -> int:
-    if not isinstance(value, str) or not re.fullmatch(r'\d+(?:\.\d+)?', value.strip()):
+    if not isinstance(value, str):
+        raise TypeError('amount must be an unsigned decimal string')
+    value = value.strip()
+    if len(value) > 64:
+        raise ValueError('amount is too long')
+    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value):
         raise TypeError('amount must be an unsigned decimal string')
     try:
         number = Decimal(value)

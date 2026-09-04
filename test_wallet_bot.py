@@ -26,6 +26,16 @@ class WalletBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(_parse_topup_amount('1.123456789'))
         self.assertEqual(format_balance(125000000), '1.25')
 
+    def test_amount_parser_enforces_range_sign_and_eight_decimals(self):
+        for valid in ('1', '1.00000000', '9999.99999999', '10000',
+                      '10000.00000000'):
+            with self.subTest(valid=valid):
+                self.assertEqual(_parse_topup_amount(valid), valid)
+        for invalid in ('0', '-1', '+1', '0.99999999', '10000.00000001',
+                        '1.000000001', '1e3', 'NaN', 'Infinity', '１'):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(_parse_topup_amount(invalid))
+
     def test_wallet_keyboard_has_topup_button(self):
         buttons = [button for row in _wallet_keyboard().inline_keyboard for button in row]
         self.assertTrue(any(button.callback_data == 'wallet_topup' for button in buttons))
@@ -60,7 +70,8 @@ class WalletBotTests(unittest.IsolatedAsyncioTestCase):
 
         text = message.reply_text.await_args.args[0]
         self.assertIn('充值 USDT', text)
-        self.assertIn('最低 1 USDT', text)
+        self.assertIn('充值范围：1–10000 USDT', text)
+        self.assertIn('支持最多 8 位小数', text)
 
     async def test_topup_command_with_amount_creates_checkout(self):
         message = SimpleNamespace(reply_text=AsyncMock())

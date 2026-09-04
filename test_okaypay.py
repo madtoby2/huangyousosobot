@@ -42,6 +42,10 @@ class OkayPayTests(unittest.TestCase):
         with self.assertRaises((TypeError, ValueError)):
             decimal_to_units(3.5, 8)
 
+    def test_decimal_conversion_rejects_pathologically_long_input(self):
+        with self.assertRaises(ValueError):
+            decimal_to_units('9' * 10000, 8)
+
     def test_create_payment_signs_request_and_rejects_unsafe_url(self):
         calls = []
         client = OkayPayClient('40109', 'secret', transport=lambda url, data: calls.append((url, data)) or {

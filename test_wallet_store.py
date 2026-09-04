@@ -15,6 +15,16 @@ class WalletStoreTests(unittest.TestCase):
     def tearDown(self):
         os.unlink(self.path)
 
+    def test_create_topup_enforces_public_amount_limits(self):
+        for invalid in ('0', '-1', '0.99999999', '10000.00000001',
+                        '1.000000001', 'NaN', 'Infinity', '１'):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises((TypeError, ValueError)):
+                    self.store.create_topup(123, invalid, 'USDT')
+        for valid in ('1', '1.00000000', '9999.99999999', '10000.00000000'):
+            with self.subTest(valid=valid):
+                self.assertEqual(self.store.create_topup(123, valid, 'USDT')['amount_text'], valid)
+
     def test_credit_is_idempotent_across_webhook_and_poll(self):
         order = self.store.create_topup(123, '2.50000000', 'USDT')
         self.store.attach_provider(order['order_id'], 'provider-1', 'https://pay.example/1')

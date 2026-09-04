@@ -145,8 +145,8 @@ class WalletStore:
 
     def create_topup(self, tg_user_id: int, amount: str, asset: str = 'USDT', lifetime: int = 1800):
         units = decimal_to_units(amount, 8)
-        if units <= 0:
-            raise ValueError('amount must be positive')
+        if units < 100_000_000 or units > 1_000_000_000_000:
+            raise ValueError('amount must be between 1 and 10000 USDT')
         now = int(time.time())
         order_id = uuid.uuid4().hex
         with self._connect() as conn:

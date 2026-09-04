@@ -11,7 +11,7 @@ import asyncio
 import logging
 import html as h
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -175,14 +175,20 @@ def _payment_client():
     return OkayPayClient(OKPAY_SHOP_ID, OKPAY_API_KEY)
 
 
+TOPUP_PROMPT = (
+    '➕ <b>充值 USDT</b>\n\n'
+    '充值范围：1–10000 USDT\n'
+    '支持最多 8 位小数（例如：1.12345678）\n\n'
+    '请输入充值金额：'
+)
+TOPUP_INVALID = '❌ 金额无效。充值范围：1–10000 USDT，支持最多 8 位小数。'
+
+
 def _parse_topup_amount(raw: str):
     value = (raw or '').strip()
-    if not re.fullmatch(r'\d+(?:\.\d{1,8})?', value):
+    if not re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,8})?', value):
         return None
-    try:
-        amount = Decimal(value)
-    except InvalidOperation:
-        return None
+    amount = Decimal(value)
     if amount < Decimal('1') or amount > Decimal('10000'):
         return None
     return value
@@ -273,7 +279,7 @@ async def wallet_topup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     _state(q.from_user.id)['awaiting_topup'] = True
     await q.edit_message_text(
-        '➕ <b>充值 USDT</b>\n\n请输入充值金额（最低 1 USDT，最多 8 位小数）：',
+        TOPUP_PROMPT,
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('取消', callback_data='wallet_home')]]),
     )
@@ -286,13 +292,13 @@ async def topup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = _parse_topup_amount(raw)
         if amount is None:
             await update.message.reply_text(
-                '❌ 金额无效，请输入 1–10000 USDT，最多 8 位小数。')
+                TOPUP_INVALID)
             return
         await _handle_topup_message(update, context, amount)
         return
     _state(update.effective_user.id)['awaiting_topup'] = True
     await update.message.reply_text(
-        '➕ <b>充值 USDT</b>\n\n请输入充值金额（最低 1 USDT，最多 8 位小数）：',
+        TOPUP_PROMPT,
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('取消', callback_data='wallet_home')]]),
     )
@@ -462,7 +468,7 @@ async def do_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if st.get('awaiting_topup'):
         amount = _parse_topup_amount(keyword)
         if amount is None:
-            await update.message.reply_text('❌ 金额无效，请输入 1–10000 USDT，最多 8 位小数。')
+            await update.message.reply_text(TOPUP_INVALID)
             return
         await _handle_topup_message(update, context, amount)
         return
