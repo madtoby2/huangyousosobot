@@ -52,6 +52,16 @@ class ArchiveProcessorTests(unittest.TestCase):
             self.assertTrue(all(not (item.flag_bits & 0x1) for item in archive.infolist()))
             self.assertEqual(archive.read('game.exe'), b'game-binary')
 
+    def test_delivery_filename_omits_source_and_decryption_labels(self):
+        source = self._encrypted_zip()
+        result = prepare_archive(
+            str(source), ['ryuugames.com'],
+            output_name='[Ryuugames] My Game 已解密 decrypted',
+        )
+        output = Path(result['path'])
+        self.assertEqual(output.name, 'My Game.zip')
+        self.assertNotRegex(output.name.lower(), r'ryu+games|decrypted|已解密')
+
     def test_wrong_password_preserves_source_and_creates_no_output(self):
         source = self._encrypted_zip('correct-password')
 

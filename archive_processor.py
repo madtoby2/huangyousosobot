@@ -52,6 +52,22 @@ SPACE_ERRORS = ('no space left', 'disk full', 'not enough space', 'enospc',
                 'cannot write', 'insufficient disk', 'no space on device')
 
 
+def clean_delivery_name(value: str) -> str:
+    name = str(value or '').strip()
+    name = re.sub(r'(?i)(?:https?://)?(?:www\.)?ryu+games(?:\.com)?', ' ', name)
+    name = re.sub(r'(?i)\bdecrypted\b', ' ', name)
+    name = name.replace('已解密', ' ')
+    name = re.sub(r'(?i)\.(?:rar|zip|7z)$', '', name.strip())
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', ' ', name)
+    name = re.sub(r'[\[\]{}()【】]+', ' ', name)
+    name = re.sub(r'[_\s-]+', ' ', name).strip(' ._-') or 'game'
+    encoded = name.encode('utf-8')
+    while len(encoded) > 180:
+        name = name[:-1]
+        encoded = name.encode('utf-8')
+    return name.rstrip(' ._-') or 'game'
+
+
 def _listed_unpacked_size(path: Path) -> int:
     proc = subprocess.run(['7z', 'l', '-slt', str(path)], capture_output=True,
                           text=True, timeout=120)
@@ -155,13 +171,17 @@ def _sha256(path: Path) -> str:
     return 'sha256:' + digest.hexdigest()
 
 
-def prepare_archive(path: str, passwords: list[str], *, reserve_bytes: int = 536_870_912):
+def prepare_archive(path: str, passwords: list[str], *, output_name: str | None = None,
+                    reserve_bytes: int = 536_870_912):
     source = Path(path)
     if not source.is_file() or source.suffix.lower() not in SUPPORTED_SUFFIXES:
         raise UnsupportedArchive('paid game delivery requires a RAR, ZIP or 7z archive')
     unpacked_size = _listed_unpacked_size(source)
     _check_space(source, unpacked_size, reserve_bytes)
-    output = source.with_name(source.stem + '_decrypted.zip')
+    delivery_name = clean_delivery_name(output_name if output_name is not None else source.stem)
+    output = source.with_name(delivery_name + '.zip')
+    if output == source:
+        output = source.with_name(delivery_name + ' (1).zip')
     work = Path(tempfile.mkdtemp(prefix='.decrypt-', dir=str(source.parent)))
     try:
         _extract(source, work, passwords)

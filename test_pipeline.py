@@ -30,7 +30,7 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = WalletStore(self.db)
         self.resource_id = game_resource_id('ryuugames', 'https://ryuugames.com/test/')
-        self.offer = {'resource_id': self.resource_id, 'title': 'Test Game',
+        self.offer = {'resource_id': self.resource_id, 'title': '[Ryuugames] Test Game 已解密',
                       'source': 'ryuugames', 'source_url': 'https://ryuugames.com/test/',
                       'download_url': 'https://www.mediafire.com/file/test/file',
                       'version': '1.0', 'price_units': 100000000}
@@ -104,9 +104,9 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
             path.write_bytes(b'encrypted-source')
             return {'path': str(path), 'file_size': path.stat().st_size,
                     'checksum': 'sha256:source', 'final_url': url}
-        def fake_prepare(path, source):
-            prepared_calls.append((path, source))
-            output = Path(path).with_name('game_decrypted.zip')
+        def fake_prepare(path, source, title):
+            prepared_calls.append((path, source, title))
+            output = Path(path).with_name('Test Game.zip')
             output.write_bytes(b'plain-zip')
             return {'path': str(output), 'file_size': output.stat().st_size,
                     'checksum': 'sha256:plain'}
@@ -119,8 +119,9 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
             self.tmp.name, stage_callback=stage, prepare_callable=fake_prepare)
 
         self.assertEqual(len(prepared_calls), 1)
-        self.assertEqual(prepared_calls[0][1], 'ryuugames')
-        self.assertTrue(uploader.calls[0][0].endswith('game_decrypted.zip'))
+        self.assertEqual(prepared_calls[0][1:], ('ryuugames', '[Ryuugames] Test Game 已解密'))
+        self.assertTrue(uploader.calls[0][0].endswith('Test Game.zip'))
+        self.assertEqual(uploader.calls[0][1], 'Test Game')
         resource = self.store.get_resource(self.resource_id)
         self.assertEqual(resource['checksum'], 'sha256:plain')
         self.assertEqual(stages, ['downloading', 'preparing', 'uploading',

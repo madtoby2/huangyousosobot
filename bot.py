@@ -108,8 +108,8 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def _prepare_paid_archive(path: str, source: str):
-    return prepare_archive(path, passwords_for_source(source))
+def _prepare_paid_archive(path: str, source: str, title: str):
+    return prepare_archive(path, passwords_for_source(source), output_name=title)
 
 
 def _delivery_configured():

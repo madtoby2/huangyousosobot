@@ -8,6 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from archive_processor import clean_delivery_name
 from delivery import DeliveryFailed, deliver_purchase
 
 
@@ -52,12 +53,12 @@ async def process_download_job(store, job_id, download_callable, uploader, bot, 
         if prepare_callable:
             await stage('preparing', result)
             prepared = await asyncio.to_thread(
-                prepare_callable, result['path'], resource['source'])
+                prepare_callable, result['path'], resource['source'], resource['title'])
             result = {**result, **prepared}
         local_path = result['path']
         store.mark_uploading(job_id, local_path, lease_token)
         await stage('uploading', result)
-        uploaded = await uploader.upload(local_path, resource['title'])
+        uploaded = await uploader.upload(local_path, clean_delivery_name(resource['title']))
         store.complete_download(job_id, storage_chat_id=uploaded['storage_chat_id'],
                                 storage_message_id=uploaded['storage_message_id'],
                                 file_size=result['file_size'], checksum=result['checksum'], lease_token=lease_token)
