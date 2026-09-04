@@ -61,13 +61,32 @@ PUBLIC_BASE_URL=https://pay.example.com
 WALLET_DB=/opt/searchbot/wallet.sqlite3
 
 GAME_PRICE_UNITS=100000000
+BT_PRICE_UNITS=100000000
+BT_MAX_BYTES=2000000000
+BT_DISK_RESERVE_BYTES=1073741824
+BT_DOWNLOAD_TIMEOUT=21600
 DOWNLOAD_DIR=/opt/searchbot/downloads
 STORAGE_CHANNEL_ID=-1001234567890
 UPLOADER_SESSION=/opt/searchbot/uploader.session
 ADMIN_TOKEN=<至少16字符的随机密码>
 ```
 
-`GAME_PRICE_UNITS` 使用 USDT 的 8 位最小单位：`100000000` 表示 `1 USDT`。
+`GAME_PRICE_UNITS` / `BT_PRICE_UNITS` 使用 USDT 的 8 位最小单位：`100000000` 表示 `1 USDT`。
+
+## BT 付费文件交付
+
+BT 详情页保留免费的“复制磁力链接”，并增加付费文件交付：
+
+```text
+Sukebei 磁力 → 校验 BTIH → aria2 下载（完成即停止做种）
+→ 单文件按番号命名；多文件打包为 ZIP
+→ 大小及 SHA-256 校验 → 上传私有仓库频道 → 发送买家
+```
+
+- 默认最大成品 2,000,000,000 字节，保留 1 GiB 磁盘空间，最长等待 6 小时。
+- 超限、无种超时、磁盘不足、aria2 失败或 Telegram 上传失败均不会缓存残缺文件，并沿用自动退款。
+- 宿主机需要 `aria2c`（Ubuntu/Debian：`apt install aria2`）。
+- 文件名只使用番号/作品标题，不包含 Sukebei、Ryuugames、decrypted 或“已解密”。
 
 ## 支持的付费下载源
 
@@ -75,8 +94,9 @@ ADMIN_TOKEN=<至少16字符的随机密码>
 
 1. MediaFire
 2. PixelDrain
+3. Sukebei BT 磁力（aria2）
 
-两者已用真实 Ryuugames 结果验证 Range 下载。Mega、Datanodes、Terabox 等尚未接入时不会作为付费源，也不会在不支持的情况下扣款。项目不依赖 JDownloader。
+HTTP 两源已用真实 Ryuugames 结果验证 Range 下载；BT 已用真实 BitTorrent peer 传输验证。Mega、Datanodes、Terabox 等尚未接入时不会作为付费源，也不会在不支持的情况下扣款。项目不依赖 JDownloader。
 
 下载保护：
 
@@ -141,7 +161,7 @@ Bot 只有在 `STORAGE_CHANNEL_ID`、已授权的小号 session 和上传认证�
 PYTHONWARNINGS=error::ResourceWarning ./venv/bin/python -m unittest discover -v
 ```
 
-覆盖 OKPay、钱包、共享下载任务、重复点击、余额不足、批量退款、直接下载、频道上传、Bot 复制交付、队列重启持久化和管理面板鉴权。
+覆盖 OKPay、钱包、共享下载任务、重复点击、余额不足、批量退款、HTTP/BT 下载、BTIH 校验、大小限制、番号命名、频道上传、Bot 复制交付、队列重启持久化和管理面板鉴权。
 
 ## 真实 E2E 验证
 

@@ -33,9 +33,10 @@ import translate
 from okaypay import OkayPayClient, OkayPayError
 from wallet_store import (InsufficientBalance, WalletStore, PaymentMismatch)
 from archive_processor import passwords_for_source, prepare_archive
-from artifacts import game_resource_id
+from artifacts import bt_resource_id, game_resource_id, magnet_info_hash
 from delivery import DeliveryFailed, deliver_purchase
 from downloader import download_game_url
+from torrent_downloader import download_magnet
 from pipeline import cleanup_stale_job_dirs, process_download_job
 from uploader import UploaderUnavailable, build_telethon_uploader
 
@@ -110,6 +111,15 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _prepare_paid_archive(path: str, source: str, title: str):
     return prepare_archive(path, passwords_for_source(source), output_name=title)
+
+
+def _download_paid_torrent(magnet: str, destination_dir: str, title: str, *, progress=None):
+    return download_magnet(
+        magnet, destination_dir, title, progress=progress,
+        max_bytes=int(os.environ.get('BT_MAX_BYTES', '2000000000')),
+        reserve_bytes=int(os.environ.get('BT_DISK_RESERVE_BYTES', '1073741824')),
+        timeout=int(os.environ.get('BT_DOWNLOAD_TIMEOUT', '21600')),
+    )
 
 
 def _delivery_configured():
@@ -231,6 +241,29 @@ def _select_paid_offer(detail, price_units, store=None):
         'download_url': selected['url'],
         'version': version,
         'price_units': int(price_units),
+    }
+
+
+def _select_bt_offer(detail, price_units, store=None):
+    magnet = str(detail.get('magnet') or '').strip()
+    source_url = str(detail.get('url') or '').strip()
+    try:
+        info_hash = magnet_info_hash(magnet)
+        resource_id = bt_resource_id(magnet)
+    except ValueError:
+        return None
+    if not source_url.startswith(('http://', 'https://')):
+        return None
+    title = detail.get('code') or search_bt.extract_video_code(detail.get('title') or '')
+    title = title or detail.get('title') or info_hash
+    if store:
+        existing = store.get_resource(resource_id)
+        if existing:
+            price_units = existing['price_units']
+    return {
+        'resource_id': resource_id, 'title': title, 'source': 'bt',
+        'source_url': source_url, 'download_url': magnet,
+        'version': info_hash, 'price_units': int(price_units),
     }
 
 
@@ -414,8 +447,8 @@ async def _download_worker(application):
             async def update_stage(stage, data=None):
                 texts = {
                     'downloading': '⏬ 正在下载付费资源…',
-                    'preparing': '🔓 下载完成，正在解密并重包为无密码 ZIP…',
-                    'uploading': '☁️ 解密重包完成，正在上传 Telegram…',
+                    'preparing': '📦 下载完成，正在处理交付文件…',
+                    'uploading': '☁️ 文件处理完成，正在上传 Telegram…',
                     'delivering': '📦 上传完成，正在发送文件…',
                     'ready': '✅ 文件交付流程已完成。',
                     'manual_review': '⚠️ Telegram 返回结果不确定，订单已转人工核对，不会重复扣款或自动退款。',
@@ -433,7 +466,8 @@ async def _download_worker(application):
             await process_download_job(
                 _wallet_store, job['job_id'], download_game_url, uploader,
                 application.bot, work_dir, stage_callback=update_stage,
-                prepare_callable=_prepare_paid_archive)
+                prepare_callable=_prepare_paid_archive,
+                torrent_callable=_download_paid_torrent)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -525,7 +559,7 @@ def combined_game_search(keyword: str, limit: int = 10):
     return {'results': results}
 
 
-def _build_bt_detail(detail):
+def _build_bt_detail(detail, offer=None):
     """构建 BT 详情：磁力使用 Telegram 原生复制按钮，不能作为 URL。"""
     lines = [f"🔗 <b>{h.escape(detail.get('title') or '')}</b>"]
     if detail.get('seeders'):
@@ -538,6 +572,9 @@ def _build_bt_detail(detail):
         lines.append(f"📅 发行: {h.escape(detail['release_date'])}")
 
     btns = []
+    if offer:
+        lines.append(f"⚡ 文件交付: {format_balance(offer['price_units'])} USDT")
+        btns.append([_paid_download_button(offer)])
     magnet = detail.get('magnet')
     if magnet:
         # Telegram CopyTextButton 上限 256 字符；xt 哈希本身即可由 BT 客户端解析。
@@ -711,7 +748,12 @@ async def _render_detail(update, q, detail, st):
                 pass
     else:
         # BT domain：有番号封面时发送图片详情卡，匹配不到则保留文字卡。
-        text, kb = _build_bt_detail(detail)
+        bt_price_units = int(os.environ.get(
+            'BT_PRICE_UNITS', os.environ.get('GAME_PRICE_UNITS', '100000000')))
+        offer = _select_bt_offer(detail, bt_price_units, _wallet_store)
+        if offer:
+            st.setdefault('paid_offers', {})[offer['resource_id']] = offer
+        text, kb = _build_bt_detail(detail, offer)
         cover = detail.get('cover') or ''
         img_bytes = None
         if cover.startswith('http'):

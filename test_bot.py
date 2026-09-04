@@ -3,10 +3,27 @@ import unittest
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 
-from bot import _build_bt_detail, _render_detail, _render_page
+from bot import (_build_bt_detail, _render_detail, _render_page,
+                 _select_bt_offer)
 
 
 class BtDetailTests(unittest.TestCase):
+    def test_bt_detail_offers_paid_file_delivery(self):
+        detail = {
+            'title': '[Group] NHDTB-706',
+            'code': 'NHDTB-706',
+            'source': 'sukebei',
+            'url': 'https://sukebei.nyaa.si/view/123',
+            'magnet': 'magnet:?xt=urn:btih:47a51b8012cd969076ae0a3ae7c65465411a4e0c',
+        }
+        offer = _select_bt_offer(detail, 100000000)
+        text, keyboard = _build_bt_detail(detail, offer)
+        buttons = [button for row in keyboard.inline_keyboard for button in row]
+        self.assertEqual(offer['source'], 'bt')
+        self.assertEqual(offer['version'], '47a51b8012cd969076ae0a3ae7c65465411a4e0c')
+        self.assertTrue(any(button.callback_data == f"buy_{offer['resource_id']}" for button in buttons))
+        self.assertIn('1 USDT', text)
+
     def test_magnet_uses_copy_text_button_not_url(self):
         magnet = 'magnet:?xt=urn:btih:47a51b8012cd969076ae0a3ae7c654'
         text, keyboard = _build_bt_detail({

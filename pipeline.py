@@ -27,7 +27,8 @@ def cleanup_stale_job_dirs(work_dir, *, older_than_seconds=86400, now=None):
 
 
 async def process_download_job(store, job_id, download_callable, uploader, bot, work_dir,
-                               progress=None, stage_callback=None, prepare_callable=None):
+                               progress=None, stage_callback=None, prepare_callable=None,
+                               torrent_callable=None):
     job = store.claim_download(job_id)
     if not job:
         current = store.get_job(job_id)
@@ -48,9 +49,17 @@ async def process_download_job(store, job_id, download_callable, uploader, bot, 
         def heartbeat_progress(written, expected):
             store.heartbeat_download(job_id, lease_token)
             if progress: progress(written, expected)
-        result = await asyncio.to_thread(download_callable, resource['download_url'], job_dir,
-                                         progress=heartbeat_progress)
-        if prepare_callable:
+        if resource['source'] == 'bt':
+            if not torrent_callable:
+                raise RuntimeError('BT downloader is not configured')
+            result = await asyncio.to_thread(
+                torrent_callable, resource['download_url'], job_dir, resource['title'],
+                progress=heartbeat_progress)
+        else:
+            result = await asyncio.to_thread(
+                download_callable, resource['download_url'], job_dir,
+                progress=heartbeat_progress)
+        if prepare_callable and resource['source'] != 'bt':
             await stage('preparing', result)
             prepared = await asyncio.to_thread(
                 prepare_callable, result['path'], resource['source'], resource['title'])

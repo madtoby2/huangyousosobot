@@ -54,13 +54,13 @@ SPACE_ERRORS = ('no space left', 'disk full', 'not enough space', 'enospc',
 
 def clean_delivery_name(value: str) -> str:
     name = str(value or '').strip()
-    name = re.sub(r'(?i)(?:https?://)?(?:www\.)?ryu+games(?:\.com)?', ' ', name)
+    name = re.sub(r'(?i)(?:https?://)?(?:www\.)?ryu+games(?:\.com)?|sukebei|nyaa|javdb', ' ', name)
     name = re.sub(r'(?i)\bdecrypted\b', ' ', name)
     name = name.replace('已解密', ' ')
     name = re.sub(r'(?i)\.(?:rar|zip|7z)$', '', name.strip())
     name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', ' ', name)
     name = re.sub(r'[\[\]{}()【】]+', ' ', name)
-    name = re.sub(r'[_\s-]+', ' ', name).strip(' ._-') or 'game'
+    name = re.sub(r'[_\s]+', ' ', name).strip(' ._-') or 'game'
     encoded = name.encode('utf-8')
     while len(encoded) > 180:
         name = name[:-1]

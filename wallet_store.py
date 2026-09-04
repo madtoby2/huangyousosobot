@@ -7,6 +7,7 @@ import time
 import uuid
 from urllib.parse import urlsplit
 
+from artifacts import InvalidMagnet, magnet_info_hash
 from okaypay import decimal_to_units
 
 
@@ -218,9 +219,15 @@ class WalletStore:
             raise ValueError('incomplete download offer')
         if int(offer['price_units']) <= 0:
             raise ValueError('price must be positive')
-        for key in ('source_url','download_url'):
-            if urlsplit(str(offer[key])).scheme not in ('http','https'):
-                raise ValueError(f'{key} must use HTTP(S)')
+        if urlsplit(str(offer['source_url'])).scheme not in ('http', 'https'):
+            raise ValueError('source_url must use HTTP(S)')
+        if str(offer['source']).lower() == 'bt':
+            try:
+                magnet_info_hash(offer['download_url'])
+            except InvalidMagnet as exc:
+                raise ValueError('download_url must be a valid BT magnet') from exc
+        elif urlsplit(str(offer['download_url'])).scheme not in ('http', 'https'):
+            raise ValueError('download_url must use HTTP(S)')
 
     def create_download_purchase(self, tg_user_id: int, offer: dict):
         self._validate_offer(offer)

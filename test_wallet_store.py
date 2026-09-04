@@ -25,6 +25,25 @@ class WalletStoreTests(unittest.TestCase):
             with self.subTest(valid=valid):
                 self.assertEqual(self.store.create_topup(123, valid, 'USDT')['amount_text'], valid)
 
+    def test_download_offer_accepts_valid_bt_magnet_only(self):
+        offer = {
+            'resource_id': 'bt:abc123', 'title': 'NHDTB-706', 'source': 'bt',
+            'source_url': 'https://sukebei.nyaa.si/view/123',
+            'download_url': 'magnet:?xt=urn:btih:47a51b8012cd969076ae0a3ae7c65465411a4e0c',
+            'version': '47a51b8012cd969076ae0a3ae7c65465411a4e0c',
+            'price_units': 100000000,
+        }
+        order = self.store.create_topup(123, '2', 'USDT')
+        self.store.attach_provider(order['order_id'], 'provider-bt', 'https://pay.example/bt')
+        self.store.credit_verified({'order_id': order['order_id'], 'provider_order_id': 'provider-bt',
+                                    'coin': 'USDT', 'amount': '2'})
+        purchase, charged, created = self.store.create_download_purchase(123, offer)
+        self.assertTrue(charged)
+        self.assertTrue(created)
+        bad = dict(offer, resource_id='bt:bad', download_url='file:///etc/passwd')
+        with self.assertRaises(ValueError):
+            self.store.create_download_purchase(123, bad)
+
     def test_credit_is_idempotent_across_webhook_and_poll(self):
         order = self.store.create_topup(123, '2.50000000', 'USDT')
         self.store.attach_provider(order['order_id'], 'provider-1', 'https://pay.example/1')

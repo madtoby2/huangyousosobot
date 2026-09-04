@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from artifacts import game_resource_id
+from artifacts import bt_resource_id, game_resource_id
 from pipeline import process_download_job
 from wallet_store import WalletStore
 
@@ -68,6 +68,34 @@ class DownloadPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(Path(uploader.calls[0][0]).exists())
         self.assertEqual(self.store.get_resource(self.resource_id)['cache_status'],'ready')
         self.assertEqual(self.store.pending_purchases_for_resource(self.resource_id), [])
+
+    async def test_bt_job_uses_torrent_downloader_and_skips_archive_decryption(self):
+        magnet = 'magnet:?xt=urn:btih:47a51b8012cd969076ae0a3ae7c65465411a4e0c'
+        offer = {
+            'resource_id': bt_resource_id(magnet), 'title': 'NHDTB-706',
+            'source': 'bt', 'source_url': 'https://sukebei.nyaa.si/view/123',
+            'download_url': magnet, 'version': magnet.rsplit(':', 1)[-1],
+            'price_units': 100000000,
+        }
+        purchase, _, _ = self.store.create_download_purchase(101, offer)
+        job = self.store.job_for_resource(offer['resource_id'])
+        torrent_calls, prepare_calls = [], []
+        def no_http(*args, **kwargs):
+            raise AssertionError('HTTP downloader must not handle magnets')
+        def fake_torrent(url, destination_dir, title, progress=None):
+            torrent_calls.append((url, title))
+            path = Path(destination_dir) / 'NHDTB-706.mp4'; path.write_bytes(b'video')
+            return {'path': str(path), 'file_size': 5, 'checksum': 'sha256:bt', 'final_url': url}
+        def no_prepare(*args):
+            prepare_calls.append(args); raise AssertionError('BT must not use archive decryptor')
+        uploader, bot = FakeUploader(), FakeBot()
+        result = await process_download_job(
+            self.store, job['job_id'], no_http, uploader, bot, self.tmp.name,
+            prepare_callable=no_prepare, torrent_callable=fake_torrent)
+        self.assertEqual(torrent_calls, [(magnet, 'NHDTB-706')])
+        self.assertEqual(prepare_calls, [])
+        self.assertEqual(result['delivered'], 1)
+        self.assertEqual(self.store.get_purchase(purchase['purchase_id'])['status'], 'delivered')
 
     async def test_ambiguous_telegram_failure_is_reported_for_manual_review(self):
         def fake_download(url,destination_dir,progress=None):
