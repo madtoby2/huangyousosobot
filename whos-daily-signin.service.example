@@ -1,0 +1,10 @@
+[Unit]
+Description=Whos.tv daily sign-in
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/searchbot
+ExecStart=/opt/searchbot/venv/bin/python /opt/searchbot/whos_daily_signin.py

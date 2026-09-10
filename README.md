@@ -81,6 +81,17 @@ ADMIN_TOKEN=<至少16字符的随机密码>
 
 直接向 Bot 发送截图（压缩图片或图片文件），Bot 会并行执行 Whos.tv 和 Yandex 同图搜索。Whos.tv 只有相似度达到 `WHOS_TV_MIN_SIMILARITY`（默认 90%）才会采用；Whos.tv 不可用或无高置信结果时，只从 Yandex 结果标题/URL 中提取明确带连字符的番号，避免把普通英文与数字误判成番号。识别成功后沿用现有 Sukebei/JavDB 列表、详情、磁力复制和 0.1 USDT 文件交付流程。查询图片只保存在单次临时目录，完成、无匹配或异常后立即删除，不记录图搜历史。
 
+## Whos.tv 每日签到
+
+`whos_daily_signin.py` 每日登录 Whos.tv，并读取 `/api/user/tasks` 回验 `daily_signin` 已领取后才返回成功。脚本不会输出账号或密码。生产机使用 `whos-daily-signin.timer`，每天 UTC 00:10 执行，随机延迟最多 120 秒，并启用 `Persistent=true` 以便错过触发时间后补跑。
+
+```bash
+systemctl status whos-daily-signin.timer
+journalctl -u whos-daily-signin.service
+```
+
+仓库内的 `whos-daily-signin.service.example` 与 `whos-daily-signin.timer.example` 是部署模板。
+
 ## BT 付费文件交付
 
 BT 详情页保留免费的“复制磁力链接”，并增加付费文件交付：

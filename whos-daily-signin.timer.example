@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Whos.tv daily sign-in every day
+
+[Timer]
+OnCalendar=*-*-* 00:10:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=whos-daily-signin.service
+
+[Install]
+WantedBy=timers.target
