@@ -4,6 +4,7 @@ Telegram 搜索与付费下载 Bot：
 
 - 🎮 黄油搜索：Ryuugames / OtomiGames
 - 🔍 BT 搜索：Sukebei / JavDB，磁力复制与番号封面
+- 📷 BT 图搜：发送截图，Whos.tv 优先、Yandex 同图来源兜底，识别番号后自动搜索 BT
 - 💰 OKPay USDT 钱包充值
 - ⚡ 余额付费后按需下载、频道缓存、Bot 交付
 - 🖥️ 本地管理面板
@@ -65,6 +66,9 @@ BT_PRICE_UNITS=10000000
 BT_MAX_BYTES=2000000000
 BT_DISK_RESERVE_BYTES=1073741824
 BT_DOWNLOAD_TIMEOUT=21600
+WHOS_TV_USERNAME=<Whos.tv username>
+WHOS_TV_PASSWORD=<Whos.tv password>
+WHOS_TV_MIN_SIMILARITY=90
 DOWNLOAD_DIR=/opt/searchbot/downloads
 STORAGE_CHANNEL_ID=-1001234567890
 UPLOADER_SESSION=/opt/searchbot/uploader.session
@@ -72,6 +76,10 @@ ADMIN_TOKEN=<至少16字符的随机密码>
 ```
 
 `GAME_PRICE_UNITS` / `BT_PRICE_UNITS` 使用 USDT 的 8 位最小单位：`10000000` 表示 `0.1 USDT`。
+
+## BT 图搜
+
+直接向 Bot 发送截图（压缩图片或图片文件），Bot 会并行执行 Whos.tv 和 Yandex 同图搜索。Whos.tv 只有相似度达到 `WHOS_TV_MIN_SIMILARITY`（默认 90%）才会采用；Whos.tv 不可用或无高置信结果时，只从 Yandex 结果标题/URL 中提取明确带连字符的番号，避免把普通英文与数字误判成番号。识别成功后沿用现有 Sukebei/JavDB 列表、详情、磁力复制和 0.1 USDT 文件交付流程。查询图片只保存在单次临时目录，完成、无匹配或异常后立即删除，不记录图搜历史。
 
 ## BT 付费文件交付
 

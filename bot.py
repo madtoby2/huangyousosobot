@@ -11,6 +11,7 @@ import asyncio
 import logging
 import html as h
 import re
+import tempfile
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -30,6 +31,8 @@ import search_ryuugames
 import search_otomi
 import search_bt
 import translate
+import whos_tv
+import yandex_images
 from okaypay import OkayPayClient, OkayPayError
 from wallet_store import (InsufficientBalance, WalletStore, PaymentMismatch)
 from archive_processor import passwords_for_source, prepare_archive
@@ -51,10 +54,23 @@ PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', '').rstrip('/')
 WALLET_DB = os.environ.get('WALLET_DB', str(Path(__file__).parent / 'wallet.sqlite3'))
 _wallet_store = WalletStore(WALLET_DB)
 _user_state = {}
+WHOS_TV_USERNAME = os.environ.get('WHOS_TV_USERNAME', '').strip()
+WHOS_TV_PASSWORD = os.environ.get('WHOS_TV_PASSWORD', '').strip()
+WHOS_TV_MIN_SIMILARITY = float(os.environ.get('WHOS_TV_MIN_SIMILARITY', '90'))
 
 
 def _state(user_id):
     return _user_state.setdefault(user_id, {})
+
+
+def _start_text():
+    return (
+        '👋 欢迎！选择搜索类型：\n\n'
+        '🎮 <b>黄油搜索</b> - 搜成人游戏 (Ryuugames/Otomi)\n'
+        '🔍 <b>BT搜索</b> - 搜 BT 磁力资源 (Sukebei/JavDB)\n'
+        '📷 <b>BT 图搜</b> - 直接发送截图，识别番号后查找 BT 资源\n\n'
+        '输入关键词开始搜索，或直接发送截图~'
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -65,12 +81,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton('💰 我的钱包', callback_data='wallet_home')],
     ])
     await update.message.reply_text(
-        '👋 欢迎！选择搜索类型：\n\n'
-        '🎮 <b>黄油搜索</b> - 搜成人游戏 (Ryuugames/Otomi)\n'
-        '🔍 <b>BT搜索</b> - 搜 BT 磁力资源 (Sukebei/JavDB)\n\n'
-        '输入关键词开始搜索，或点下面按钮切换搜索域~',
-        parse_mode='HTML',
-        reply_markup=kb,
+        _start_text(), parse_mode='HTML', reply_markup=kb,
     )
 
 
@@ -101,11 +112,7 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton('💰 我的钱包', callback_data='wallet_home')],
     ])
     await q.edit_message_text(
-        '👋 选择搜索类型：\n\n'
-        '🎮 <b>黄油搜索</b> - 搜成人游戏 (Ryuugames/Otomi)\n'
-        '🔍 <b>BT搜索</b> - 搜 BT 磁力资源 (Sukebei/JavDB)',
-        parse_mode='HTML',
-        reply_markup=kb,
+        _start_text(), parse_mode='HTML', reply_markup=kb,
     )
 
 
@@ -503,6 +510,96 @@ async def _post_shutdown(application):
             task.cancel()
 
 
+def _trusted_whos_matches(result, minimum=None):
+    threshold = WHOS_TV_MIN_SIMILARITY if minimum is None else float(minimum)
+    trusted = []
+    for item in (result or {}).get('matches', []):
+        code = str(item.get('code') or '').strip().upper()
+        try:
+            similarity = float(item.get('similarity') or 0)
+        except (TypeError, ValueError):
+            continue
+        if code and similarity >= threshold:
+            trusted.append({**item, 'code': code, 'similarity': similarity})
+    return sorted(trusted, key=lambda item: item['similarity'], reverse=True)
+
+
+def _run_whos_search(image_path):
+    return whos_tv.search(WHOS_TV_USERNAME, WHOS_TV_PASSWORD, image_path)
+
+
+def _run_yandex_search(image_path):
+    return yandex_images.search(image_path)
+
+
+def _code_from_yandex(result):
+    # General-result prose often contains phrases such as "them 281". The
+    # permissive BT-title parser would normalize that into a false code, so
+    # only accept an explicitly hyphenated catalog number from web matches.
+    for site in (result or {}).get('sites', []):
+        for value in (site.get('title'), site.get('url')):
+            match = re.search(r'([A-Z]{2,10}-\d{2,6})(?!\d)', str(value or '').upper())
+            if match:
+                return match.group(1)
+    return ''
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    status = await message.reply_text('📷 正在识别截图…')
+    photo = (message.photo or [])[-1] if getattr(message, 'photo', None) else None
+    document = getattr(message, 'document', None)
+    file_id = getattr(photo or document, 'file_id', '')
+    if not file_id:
+        await status.edit_text('❌ 没有读取到图片。')
+        return
+    try:
+        with tempfile.TemporaryDirectory(prefix='searchbot_ris_') as task_dir:
+            suffix = Path(getattr(document, 'file_name', '') or '').suffix.lower() if document else '.jpg'
+            if suffix not in ('.jpg', '.jpeg', '.png', '.webp'):
+                suffix = '.jpg'
+            image_path = Path(task_dir) / f'query{suffix}'
+            tg_file = await context.bot.get_file(file_id)
+            await tg_file.download_to_drive(custom_path=str(image_path))
+            whos_result, yandex_result = await asyncio.gather(
+                asyncio.to_thread(_run_whos_search, str(image_path)),
+                asyncio.to_thread(_run_yandex_search, str(image_path)),
+            )
+        matches = _trusted_whos_matches(whos_result)
+        best = matches[0] if matches else None
+        code = best['code'] if best else _code_from_yandex(yandex_result)
+        if not code:
+            await status.edit_text('😔 没有找到可信匹配，换一张更清晰、人物画面更完整的截图试试。')
+            return
+        if best:
+            match_text = f'{best["similarity"]:.1f}%'
+            source = 'Whos.tv'
+        else:
+            match_text = '网页同图来源'
+            source = 'Yandex'
+        await status.edit_text(
+            f'🎯 {source} 识别到 <b>{h.escape(code)}</b>（{match_text}），正在搜索 BT…',
+            parse_mode='HTML',
+        )
+        results = (await asyncio.to_thread(search_bt.search, code, 10)).get('results', [])
+        if not results:
+            await status.edit_text(
+                f'🎯 识别到 <b>{h.escape(code)}</b>，但暂时没有找到 BT 资源。',
+                parse_mode='HTML',
+            )
+            return
+        st = _state(update.effective_user.id)
+        st['domain'] = 'bt'
+        st['results'] = results
+        st['page'] = 0
+        st['keyword'] = code
+        st['image_match'] = best or {'code': code, 'source': 'yandex'}
+        await _render_page(update, status, st)
+    except Exception as exc:
+        logger.exception('BT 图搜失败')
+        await status.edit_text(f'❌ 图搜失败：{h.escape(str(exc)[:120])}', parse_mode='HTML')
+
+
 async def do_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """文本消息 -> 搜索"""
     user_id = update.effective_user.id
@@ -803,7 +900,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '2. 输入关键词搜索，结果列表点选\n'
         '3. 点结果查看详情（带封面图+简介）\n'
         '4. 黄油：下载按钮直达镜像；BT：磁力一键复制\n'
-        '5. /topup 金额：创建 USDT 充值订单\n\n'
+        '5. BT 图搜：直接发送截图，识别番号后自动搜索 BT\n'
+        '6. /topup 金额：创建 USDT 充值订单\n\n'
         '💡 提示：BT 搜索直接输入番号 (如 MIDV-726) 更快~',
         parse_mode='HTML',
     )
@@ -830,6 +928,7 @@ def main():
     app.add_handler(CallbackQueryHandler(pick_item, pattern='^pick_'))
     app.add_handler(CallbackQueryHandler(page_refresh, pattern='^page_refresh$'))
     app.add_handler(CallbackQueryHandler(noop, pattern='^noop$'))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, do_search))
 
     logger.info('Starting search bot...')
