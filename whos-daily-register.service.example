@@ -1,0 +1,11 @@
+[Unit]
+Description=Whos.tv daily account registration (pool top-up)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/searchbot
+EnvironmentFile=/opt/searchbot/.env
+ExecStart=/opt/searchbot/venv/bin/python /opt/searchbot/whos_daily_register.py

@@ -13,3 +13,4 @@ searchbot.service
 tg_uploader_*.py
 whos_accounts.json
 .whos_accounts.*.tmp
+whos_register_state.json

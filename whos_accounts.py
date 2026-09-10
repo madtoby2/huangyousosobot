@@ -132,6 +132,11 @@ def _primary_invite_code(username: str, password: str) -> str:
         client.close()
 
 
+def resolve_invite_code(username: str, password: str) -> str:
+    """Public wrapper: read the invite code from the primary account."""
+    return _primary_invite_code(username, password)
+
+
 def main() -> int:
     load_dotenv(Path(__file__).with_name('.env'))
     parser = argparse.ArgumentParser(description='Register authorized Whos.tv accounts')

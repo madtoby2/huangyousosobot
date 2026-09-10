@@ -71,6 +71,8 @@ WHOS_TV_PASSWORD=<Whos.tv password>
 WHOS_TV_ACCOUNTS_FILE=/opt/searchbot/whos_accounts.json
 WHOS_TV_INVITE_CODE=
 WHOS_TV_MIN_SIMILARITY=90
+WHOS_TV_DAILY_REGISTER=5
+WHOS_TV_REGISTER_PREFIX=sb
 DOWNLOAD_DIR=/opt/searchbot/downloads
 STORAGE_CHANNEL_ID=-1001234567890
 UPLOADER_SESSION=/opt/searchbot/uploader.session
@@ -101,6 +103,29 @@ journalctl -u whos-daily-signin.service
 ```
 
 仓库内的 `whos-daily-signin.service.example` 与 `whos-daily-signin.timer.example` 是部署模板。
+
+## Whos.tv 每日账号注册
+
+Whos.tv 账号是消耗品：每次图搜扣积分，积分靠每日任务与邀请回补。所以池子每天自动补 5 个新账号：
+
+`whos_daily_register.py` 用主账号邀请码（或 `WHOS_TV_INVITE_CODE`）注册 5 个新账号并逐个写入 `whos_accounts.json`（0600）。单个账号失败最多重试 3 次，不会中断整批；当天已执行过直接跳过（状态记在 `whos_register_state.json`）。
+
+```bash
+./venv/bin/python whos_daily_register.py            # 每日补 5 个
+./venv/bin/python whos_daily_register.py --force    # 忽略当日状态
+```
+
+输出例：`REGISTER_OK created=5 failed=0 pool_total=11`；部分失败时退出码非 0（便于 Timer 日志告警）。
+
+环境变量：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `WHOS_TV_DAILY_REGISTER` | `5` | 每天注册数量，`0` 关闭 |
+| `WHOS_TV_REGISTER_PREFIX` | `sb` | 用户名前缀 |
+| `WHOS_TV_REGISTER_STATE_FILE` | `whos_register_state.json` | 当日去重状态文件 |
+
+生产 Timer 每天 UTC 00:20 执行（排在 00:10 的每日任务之后），模板见 `whos-daily-register.service.example` / `whos-daily-register.timer.example`。
 
 ## BT 付费文件交付
 

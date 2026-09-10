@@ -1,0 +1,11 @@
+[Unit]
+Description=Register 5 fresh Whos.tv accounts every day
+
+[Timer]
+OnCalendar=*-*-* 00:20:00 UTC
+Persistent=false
+RandomizedDelaySec=300
+Unit=whos-daily-register.service
+
+[Install]
+WantedBy=timers.target
