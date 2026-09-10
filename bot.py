@@ -32,6 +32,7 @@ import search_otomi
 import search_bt
 import translate
 import whos_tv
+import whos_accounts
 import yandex_images
 from okaypay import OkayPayClient, OkayPayError
 from wallet_store import (InsufficientBalance, WalletStore, PaymentMismatch)
@@ -56,6 +57,8 @@ _wallet_store = WalletStore(WALLET_DB)
 _user_state = {}
 WHOS_TV_USERNAME = os.environ.get('WHOS_TV_USERNAME', '').strip()
 WHOS_TV_PASSWORD = os.environ.get('WHOS_TV_PASSWORD', '').strip()
+WHOS_TV_ACCOUNTS_FILE = os.environ.get(
+    'WHOS_TV_ACCOUNTS_FILE', whos_accounts.DEFAULT_ACCOUNTS_FILE)
 WHOS_TV_MIN_SIMILARITY = float(os.environ.get('WHOS_TV_MIN_SIMILARITY', '90'))
 
 
@@ -68,7 +71,7 @@ def _start_text():
         '👋 欢迎！选择搜索类型：\n\n'
         '🎮 <b>黄油搜索</b> - 搜成人游戏 (Ryuugames/Otomi)\n'
         '🔍 <b>BT搜索</b> - 搜 BT 磁力资源 (Sukebei/JavDB)\n'
-        '📷 <b>BT 图搜</b> - 直接发送截图，识别番号后查找 BT 资源\n\n'
+        '📷 <b>BT 图搜</b> - Whos.tv 账号池 + Yandex 聚合识别，自动查找 BT\n\n'
         '输入关键词开始搜索，或直接发送截图~'
     )
 
@@ -525,7 +528,12 @@ def _trusted_whos_matches(result, minimum=None):
 
 
 def _run_whos_search(image_path):
-    return whos_tv.search(WHOS_TV_USERNAME, WHOS_TV_PASSWORD, image_path)
+    accounts = whos_accounts.load_accounts(
+        WHOS_TV_ACCOUNTS_FILE, WHOS_TV_USERNAME, WHOS_TV_PASSWORD)
+    if not accounts:
+        return None
+    pool = whos_accounts.WhosAccountPool(accounts)
+    return pool.search(image_path)
 
 
 def _run_yandex_search(image_path):
@@ -900,7 +908,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '2. 输入关键词搜索，结果列表点选\n'
         '3. 点结果查看详情（带封面图+简介）\n'
         '4. 黄油：下载按钮直达镜像；BT：磁力一键复制\n'
-        '5. BT 图搜：直接发送截图，识别番号后自动搜索 BT\n'
+        '5. BT 图搜：Whos.tv 账号池与 Yandex 聚合识别，自动搜索 BT\n'
         '6. /topup 金额：创建 USDT 充值订单\n\n'
         '💡 提示：BT 搜索直接输入番号 (如 MIDV-726) 更快~',
         parse_mode='HTML',

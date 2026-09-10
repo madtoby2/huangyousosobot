@@ -4,7 +4,7 @@ Telegram 搜索与付费下载 Bot：
 
 - 🎮 黄油搜索：Ryuugames / OtomiGames
 - 🔍 BT 搜索：Sukebei / JavDB，磁力复制与番号封面
-- 📷 BT 图搜：发送截图，Whos.tv 优先、Yandex 同图来源兜底，识别番号后自动搜索 BT
+- 📷 BT 图搜：发送截图，Whos.tv 账号池与 Yandex 聚合识别，识别番号后自动搜索 BT
 - 💰 OKPay USDT 钱包充值
 - ⚡ 余额付费后按需下载、频道缓存、Bot 交付
 - 🖥️ 本地管理面板
@@ -68,6 +68,8 @@ BT_DISK_RESERVE_BYTES=1073741824
 BT_DOWNLOAD_TIMEOUT=21600
 WHOS_TV_USERNAME=<Whos.tv username>
 WHOS_TV_PASSWORD=<Whos.tv password>
+WHOS_TV_ACCOUNTS_FILE=/opt/searchbot/whos_accounts.json
+WHOS_TV_INVITE_CODE=
 WHOS_TV_MIN_SIMILARITY=90
 DOWNLOAD_DIR=/opt/searchbot/downloads
 STORAGE_CHANNEL_ID=-1001234567890
@@ -77,13 +79,21 @@ ADMIN_TOKEN=<至少16字符的随机密码>
 
 `GAME_PRICE_UNITS` / `BT_PRICE_UNITS` 使用 USDT 的 8 位最小单位：`10000000` 表示 `0.1 USDT`。
 
-## BT 图搜
+## BT 图搜与 Whos.tv 账号池
 
-直接向 Bot 发送截图（压缩图片或图片文件），Bot 会并行执行 Whos.tv 和 Yandex 同图搜索。Whos.tv 只有相似度达到 `WHOS_TV_MIN_SIMILARITY`（默认 90%）才会采用；Whos.tv 不可用或无高置信结果时，只从 Yandex 结果标题/URL 中提取明确带连字符的番号，避免把普通英文与数字误判成番号。识别成功后沿用现有 Sukebei/JavDB 列表、详情、磁力复制和 0.1 USDT 文件交付流程。查询图片只保存在单次临时目录，完成、无匹配或异常后立即删除，不记录图搜历史。
+直接向 Bot 发送截图（压缩图片或图片文件），Bot 会并行执行 Whos.tv 与 Yandex。Whos.tv 账号池会逐个检查 `/api/user/points/can-search`，跳过积分不足的账号，只对可搜索账号上传一次图片；Whos.tv 不可用或没有达到 `WHOS_TV_MIN_SIMILARITY`（默认 90%）的结果时，使用 Yandex 明确带连字符的番号结果。识别成功后沿用 Sukebei/JavDB 列表、详情、磁力复制和文件交付流程。图片只存在单次临时目录，不记录图搜历史。
 
-## Whos.tv 每日签到
+账号池文件默认为 `whos_accounts.json`，权限固定为 `0600` 且已加入 `.gitignore`。主账号仍从 `.env` 读取。注册一个授权账号并加入池：
 
-`whos_daily_signin.py` 每日登录 Whos.tv，并读取 `/api/user/tasks` 回验 `daily_signin` 已领取后才返回成功。脚本不会输出账号或密码。生产机使用 `whos-daily-signin.timer`，每天 UTC 00:10 执行，随机延迟最多 120 秒，并启用 `Persistent=true` 以便错过触发时间后补跑。
+```bash
+./venv/bin/python whos_accounts.py --register 1
+```
+
+注册过程使用主账号邀请码（也可用 `WHOS_TV_INVITE_CODE` 指定），日志不会输出用户名或密码。
+
+## Whos.tv 每日任务
+
+`whos_daily_signin.py` 对主账号和账号池逐个执行并回验：每日签到 1 次、评分 5 次、收藏 5 次、分享 5 次。脚本先读进度，只补未完成次数；再次运行不会重复已完成任务。生产 Timer 每天 UTC 00:10 执行，随机延迟不超过 120 秒，并启用 `Persistent=true`。
 
 ```bash
 systemctl status whos-daily-signin.timer

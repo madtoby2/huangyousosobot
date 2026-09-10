@@ -11,3 +11,5 @@ searchbot.service
 *.session-journal
 .uploader_*
 tg_uploader_*.py
+whos_accounts.json
+.whos_accounts.*.tmp

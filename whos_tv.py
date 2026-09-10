@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-import requests
+from curl_cffi import CurlMime
+from curl_cffi import requests as cffi_requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -59,13 +60,9 @@ def parse_result_page(html_text: str, result_url: str) -> dict:
                 if image:
                     preview = urljoin(BASE_URL, image["src"])
         matches.append({
-            "code": code,
-            "title": title,
-            "similarity": similarity,
-            "at": at,
+            "code": code, "title": title, "similarity": similarity, "at": at,
             "url": urljoin(BASE_URL, f"/videos/{parts[1]}"),
-            "frame_url": frame_url,
-            "preview": preview,
+            "frame_url": frame_url, "preview": preview,
         })
         seen.add(code)
     matches.sort(key=lambda item: item["similarity"], reverse=True)
@@ -75,18 +72,18 @@ def parse_result_page(html_text: str, result_url: str) -> dict:
 class WhosTvClient:
     def __init__(self, username: str, password: str, *, request_timeout: int = 30,
                  upload_timeout: int = 90, max_wait: int = 60,
-                 poll_interval: float = 2.0):
+                 poll_interval: float = 2.0, session_factory=None):
         self.username = username
         self.password = password
         self.request_timeout = request_timeout
         self.upload_timeout = upload_timeout
         self.max_wait = max_wait
         self.poll_interval = poll_interval
-        self.session = requests.Session()
+        factory = session_factory or cffi_requests.Session
+        self.session = factory(impersonate='chrome')
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
-            "Referer": f"{BASE_URL}/",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7", "Referer": f"{BASE_URL}/",
         })
 
     def close(self):
@@ -94,8 +91,7 @@ class WhosTvClient:
 
     def login(self) -> None:
         response = self.session.post(
-            f"{BASE_URL}/api/login",
-            json={"username": self.username, "password": self.password},
+            f"{BASE_URL}/api/login", json={"username": self.username, "password": self.password},
             headers={"Accept": "application/json", "Content-Type": "application/json"},
             timeout=self.request_timeout,
         )
@@ -104,20 +100,41 @@ class WhosTvClient:
         if payload.get("code") not in _SUCCESS_CODES:
             raise RuntimeError(payload.get("message") or "Whos.tv login failed")
 
+    def profile(self) -> dict:
+        response = self.session.get(f'{BASE_URL}/api/user/profile', timeout=self.request_timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get('code') not in _SUCCESS_CODES:
+            raise RuntimeError(payload.get('message') or 'Whos.tv profile failed')
+        return payload.get('data') or {}
+
+    def can_search(self, action: str = 'search_screenshot') -> dict:
+        response = self.session.get(
+            f'{BASE_URL}/api/user/points/can-search', params={'action': action},
+            timeout=self.request_timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get('code') not in _SUCCESS_CODES:
+            raise RuntimeError(payload.get('message') or 'Whos.tv point check failed')
+        return payload.get('data') or {}
+
     def _upload(self, image_path: str) -> str:
-        with open(image_path, "rb") as image:
+        multipart = CurlMime()
+        multipart.addpart(
+            name="file", filename=Path(image_path).name, local_path=image_path)
+        try:
             response = self.session.post(
-                f"{BASE_URL}/upload-search",
-                files={"file": (Path(image_path).name, image)},
+                f"{BASE_URL}/upload-search", multipart=multipart,
                 headers={"Accept": "text/plain,*/*", "X-Requested-With": "XMLHttpRequest"},
-                timeout=self.upload_timeout,
-                allow_redirects=False,
+                timeout=self.upload_timeout, allow_redirects=False,
             )
+        finally:
+            multipart.close()
         response.raise_for_status()
         return response.text.strip()
 
-    def search(self, image_path: str) -> dict:
-        self.login()
+    def search_authenticated(self, image_path: str) -> dict:
         wait_url = self._upload(image_path)
         if "login=1" in wait_url:
             self.login()
@@ -144,6 +161,10 @@ class WhosTvClient:
                 continue
             raise RuntimeError(f"Whos.tv search failed: {result_url[:120]}")
         raise TimeoutError(f"Whos.tv search timed out after {self.max_wait}s")
+
+    def search(self, image_path: str) -> dict:
+        self.login()
+        return self.search_authenticated(image_path)
 
 
 def search(username: str, password: str, image_path: str) -> dict | None:
