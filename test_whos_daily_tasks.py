@@ -8,17 +8,9 @@ except ImportError:
     whos_daily_tasks = None
 
 
-VIDEO_LIST = '''
-<a href="/videos/code-a">A</a><a href="/videos/code-b">B</a>
-'''
-VIDEO_A = '''
-<button onclick="showRating('101', 'A', '0', '0', '0')"></button>
-<button data-id="101" data-favorite="false"></button>
-'''
-VIDEO_B = '''
-<button onclick="showRating('102', 'B', '0', '0', '0')"></button>
-<button data-id="102" data-favorite="false"></button>
-'''
+VIDEO_LIST = '<a href="/videos/code-a">A</a><a href="/videos/code-b">B</a>'
+VIDEO_A = '<button onclick="showRating(\'101\', \'A\', \'0\', \'0\', \'0\')"></button><button data-id="101" data-favorite="false"></button>'
+VIDEO_B = '<button onclick="showRating(\'102\', \'B\', \'0\', \'0\', \'0\')"></button><button data-id="102" data-favorite="false"></button>'
 
 
 def response(payload=None, text=''):
@@ -35,6 +27,17 @@ class WhosDailyTaskTests(unittest.TestCase):
     def test_parse_video_candidate_reads_id_rating_and_favorite(self):
         item = whos_daily_tasks.parse_video_candidate(VIDEO_A, 'code-a')
         self.assertEqual(item, {'slug': 'code-a', 'id': '101', 'my_rating': 0, 'is_favorite': False})
+
+    def test_failure_summary_keeps_actionable_message_but_redacts_credentials(self):
+        exc = RuntimeError('login failed for user123 with pass123; HTTP 401')
+        summary = whos_daily_tasks._failure_summary(exc, {'username': 'user123', 'password': 'pass123'})
+        self.assertIn('HTTP 401', summary)
+        self.assertNotIn('user123', summary)
+        self.assertNotIn('pass123', summary)
+
+    def test_failure_summary_is_bounded(self):
+        summary = whos_daily_tasks._failure_summary(RuntimeError('x' * 1000), {})
+        self.assertLessEqual(len(summary), 240)
 
     def test_complete_daily_tasks_is_idempotent_and_verified(self):
         session = mock.Mock()
@@ -79,7 +82,6 @@ class WhosDailyTaskTests(unittest.TestCase):
 
         result = whos_daily_tasks.complete_daily_tasks(session, 'user123', 'pass123')
 
-        # Login is the only POST when everything is already complete.
         self.assertEqual(session.post.call_count, 1)
         self.assertTrue(result['all_complete'])
 

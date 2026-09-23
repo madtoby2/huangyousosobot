@@ -6,6 +6,7 @@ import os
 import re
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from curl_cffi import requests as cffi_requests
 from dotenv import load_dotenv
@@ -135,6 +136,17 @@ def complete_daily_tasks(session, username: str, password: str) -> dict:
             'points_balance': profile.get('points_balance')}
 
 
+def _failure_summary(exc: Exception, account: dict) -> str:
+    """Keep actionable failure details while never logging account credentials."""
+    message = f'{type(exc).__name__}: {exc}'.replace('\n', ' ')
+    for key in ('username', 'password'):
+        secret = str(account.get(key) or '')
+        if secret:
+            for variant in {secret, quote(secret, safe='')}:
+                message = message.replace(variant, '<redacted>')
+    return message[:240]
+
+
 def main() -> int:
     load_dotenv(Path(__file__).with_name('.env'))
     accounts = load_accounts(
@@ -153,7 +165,7 @@ def main() -> int:
             print(f"TASKS_OK account={index}/{len(accounts)} points={result['points_balance']}")
         except Exception as exc:
             failures.append((index, exc))
-            print(f'TASKS_FAILED account={index}/{len(accounts)} error={type(exc).__name__}')
+            print(f'TASKS_FAILED account={index}/{len(accounts)} reason={_failure_summary(exc, account)}')
         finally:
             session.close()
     if failures:
