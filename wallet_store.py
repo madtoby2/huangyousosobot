@@ -121,6 +121,17 @@ class WalletStore:
                     ON topup_orders(status, expires_at);
                 CREATE INDEX IF NOT EXISTS idx_download_purchase_pending
                     ON download_purchases(resource_id,status,created_at);
+                CREATE TABLE IF NOT EXISTS search_history (
+                    history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tg_user_id INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    query TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_search_history_user_time
+                    ON search_history(tg_user_id, history_id DESC);
                 CREATE TRIGGER IF NOT EXISTS validate_download_job_status_insert
                 BEFORE INSERT ON download_jobs WHEN NEW.status NOT IN
                     ('queued','downloading','uploading','ready','failed')
@@ -450,6 +461,26 @@ class WalletStore:
         with self._connect() as conn:
             rows = conn.execute('''SELECT * FROM download_purchases WHERE tg_user_id=?
                                    ORDER BY created_at,purchase_id''', (tg_user_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_search(self, tg_user_id: int, source: str, query: str, title: str,
+                      resource_id: str) -> int:
+        with self._connect() as conn:
+            cur = conn.execute('''INSERT INTO search_history
+                (tg_user_id,source,query,title,resource_id,created_at)
+                VALUES(?,?,?,?,?,?)''', (int(tg_user_id), str(source), str(query)[:200],
+                str(title)[:500], str(resource_id)[:300], int(time.time())))
+            conn.execute('''DELETE FROM search_history WHERE tg_user_id=? AND history_id NOT IN
+                (SELECT history_id FROM search_history WHERE tg_user_id=?
+                 ORDER BY history_id DESC LIMIT 200)''', (int(tg_user_id), int(tg_user_id)))
+            return int(cur.lastrowid)
+
+    def search_history_for(self, tg_user_id: int, limit: int = 20):
+        limit = min(max(int(limit), 1), 50)
+        with self._connect() as conn:
+            rows = conn.execute('''SELECT history_id,source,query,title,resource_id,created_at
+                FROM search_history WHERE tg_user_id=? ORDER BY history_id DESC LIMIT ?''',
+                (int(tg_user_id), limit)).fetchall()
         return [dict(row) for row in rows]
 
     def pending_purchases_for_resource(self, resource_id: str):

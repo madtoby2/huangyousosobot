@@ -82,6 +82,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton('🎮 黄油搜索', callback_data='domain_ryu')],
         [InlineKeyboardButton('🔍 BT搜索', callback_data='domain_bt')],
         [InlineKeyboardButton('💰 我的钱包', callback_data='wallet_home')],
+        [InlineKeyboardButton('📚 我的记录', callback_data='user_history')],
     ])
     await update.message.reply_text(
         _start_text(), parse_mode='HTML', reply_markup=kb,
@@ -105,6 +106,35 @@ async def domain_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def user_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if q:
+        await q.answer()
+        user_id = q.from_user.id
+    else:
+        user_id = update.effective_user.id
+    searches = _wallet_store.search_history_for(user_id, 10)
+    purchases = _wallet_store.purchases_for(user_id)[-10:][::-1]
+    lines = ['📚 <b>我的记录</b>', '']
+    lines.append('<b>最近搜索</b>')
+    if searches:
+        for row in searches:
+            lines.append(f"• {h.escape(row['query'])} · {h.escape(row['source'])}")
+    else:
+        lines.append('暂无搜索记录')
+    lines += ['', '<b>购买/交付</b>']
+    if purchases:
+        for row in purchases:
+            lines.append(f"• {h.escape(row['title'])} · {h.escape(row['status'])}")
+    else:
+        lines.append('暂无购买记录')
+    if q:
+        await q.edit_message_text('\n'.join(lines), parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('↩️ 返回首页', callback_data='back_start')]]))
+    else:
+        await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
+
+
 async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -113,6 +143,7 @@ async def back_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton('🎮 黄油搜索', callback_data='domain_ryu')],
         [InlineKeyboardButton('🔍 BT搜索', callback_data='domain_bt')],
         [InlineKeyboardButton('💰 我的钱包', callback_data='wallet_home')],
+        [InlineKeyboardButton('📚 我的记录', callback_data='user_history')],
     ])
     await q.edit_message_text(
         _start_text(), parse_mode='HTML', reply_markup=kb,
@@ -644,6 +675,7 @@ async def do_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st['results'] = results
     st['page'] = 0
     st['keyword'] = keyword
+    _wallet_store.record_search(update.effective_user.id, domain, keyword, keyword, f'query:{domain}:{keyword.casefold()}')
     await _render_page(update, status, st)
 
 
@@ -922,11 +954,13 @@ def main():
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_cmd))
     app.add_handler(CommandHandler('wallet', wallet_cmd))
+    app.add_handler(CommandHandler('history', user_history))
     app.add_handler(CommandHandler('balance', wallet_cmd))
     app.add_handler(CommandHandler('topup', topup_cmd))
     app.add_handler(CommandHandler('recharge', topup_cmd))
     app.add_handler(CommandHandler('deposit', topup_cmd))
     app.add_handler(CallbackQueryHandler(wallet_cmd, pattern='^wallet_home$'))
+    app.add_handler(CallbackQueryHandler(user_history, pattern='^user_history$'))
     app.add_handler(CallbackQueryHandler(wallet_topup, pattern='^wallet_topup$'))
     app.add_handler(CallbackQueryHandler(check_topup, pattern='^checkpay_'))
     app.add_handler(CallbackQueryHandler(buy_download, pattern='^buy_'))
