@@ -34,6 +34,7 @@ import translate
 import whos_tv
 import whos_accounts
 import yandex_images
+import game_title_index
 from okaypay import OkayPayClient, OkayPayError
 from wallet_store import (InsufficientBalance, WalletStore, PaymentMismatch)
 from archive_processor import passwords_for_source, prepare_archive
@@ -69,7 +70,8 @@ def _state(user_id):
 def _start_text():
     return (
         '👋 欢迎！选择搜索类型：\n\n'
-        '🎮 <b>黄油搜索</b> - 搜成人游戏 (Ryuugames/Otomi)\n'
+        '🎮 <b>黄油搜索</b> - 搜成人游戏 (Ryuugames/Otomi)，支持中英名互搜\n'
+        '　未配对时按原关键词搜索，结果保留站点原标题（英文为主）\n'
         '🔍 <b>BT搜索</b> - 搜 BT 磁力资源 (Sukebei/JavDB)\n'
         '📷 <b>BT 图搜</b> - Whos.tv 账号池 + Yandex 聚合识别，自动查找 BT\n\n'
         '输入关键词开始搜索，或直接发送截图~'
@@ -675,6 +677,9 @@ async def do_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st['results'] = results
     st['page'] = 0
     st['keyword'] = keyword
+    if domain == 'ryu':
+        # RJ/translation metadata enrichment is best-effort and stays off the reply path.
+        asyncio.create_task(asyncio.to_thread(game_title_index.get_index().learn_from_results, results))
     _wallet_store.record_search(update.effective_user.id, domain, keyword, keyword, f'query:{domain}:{keyword.casefold()}')
     await _render_page(update, status, st)
 
@@ -697,15 +702,26 @@ def _title_matches(item, keyword: str) -> bool:
 
 
 def combined_game_search(keyword: str, limit: int = 10):
-    """黄油搜索：Ryuugames + Otomi 聚合 + 标题相关度过滤"""
-    r1 = search_ryuugames.search(keyword, limit)
-    r2 = search_otomi.search(keyword, limit)
-    results = (r1.get('results', []) + r2.get('results', []))[:limit]
-    # 标题相关度过滤：保留标题含关键词的结果；全不匹配才回退全部
-    matched = [x for x in results if _title_matches(x, keyword)]
+    """黄油搜索：RJ 中英别名扩展后查询 Ryuugames + Otomi。"""
+    search_terms = game_title_index.get_index().resolve_search_terms(keyword)
+    results, seen = [], set()
+    for term in search_terms or [keyword]:
+        for adapter in (search_ryuugames, search_otomi):
+            payload = adapter.search(term, limit)
+            for item in payload.get('results', []):
+                key = (item.get('url') or '').strip().rstrip('/').casefold()
+                if not key:
+                    key = (item.get('source', ''), game_title_index.normalize_title(item.get('title', '')))
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append(item)
+    # 匹配任一已关联标题；只有完全没有可判定命中时才保留原站结果兜底。
+    matched = [item for item in results
+               if any(_title_matches(item, term) for term in (search_terms or [keyword]))]
     if matched:
         results = matched
-    return {'results': results}
+    return {'results': results[:limit]}
 
 
 def _build_bt_detail(detail, offer=None):
@@ -939,7 +955,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '1. 发送 /start 选择搜索域\n'
         '2. 输入关键词搜索，结果列表点选\n'
         '3. 点结果查看详情（带封面图+简介）\n'
-        '4. 黄油：下载按钮直达镜像；BT：磁力一键复制\n'
+        '4. 黄油：中英名按作品关联互搜；未配对按原词搜并保留站点原标题；下载按钮直达镜像\n'
+        '   BT：磁力一键复制\n'
         '5. BT 图搜：Whos.tv 账号池与 Yandex 聚合识别，自动搜索 BT\n'
         '6. /topup 金额：创建 USDT 充值订单\n\n'
         '💡 提示：BT 搜索直接输入番号 (如 MIDV-726) 更快~',
