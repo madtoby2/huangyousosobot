@@ -35,6 +35,30 @@ class ChannelUploader:
         finally:
             await client.disconnect()
 
+    async def upload_video(self, path: str, caption: str):
+        file_path = Path(path)
+        video_suffixes = {'.3gp', '.avi', '.flv', '.m4v', '.mkv', '.mov',
+                          '.mp4', '.mpeg', '.mpg', '.mts', '.ts', '.webm', '.wmv'}
+        if (not file_path.is_file() or file_path.stat().st_size <= 0 or
+                file_path.suffix.lower() not in video_suffixes):
+            raise UploaderUnavailable('upload video is missing, empty, or unsupported')
+        client = self.client_factory()
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                raise UploaderUnavailable('uploader session is not authorized')
+            message = await client.send_file(
+                self.channel_id, str(file_path), caption=str(caption)[:1000],
+                force_document=False,
+                supports_streaming=file_path.suffix.lower() == '.mp4',
+                parse_mode=None)
+            if not getattr(message, 'id', None):
+                raise UploaderUnavailable('Telegram returned no storage message id')
+            return {'storage_chat_id': self.channel_id,
+                    'storage_message_id': int(message.id)}
+        finally:
+            await client.disconnect()
+
 
 def build_telethon_uploader(root=None):
     root = Path(root or Path(__file__).resolve().parent)

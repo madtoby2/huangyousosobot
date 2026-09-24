@@ -12,6 +12,7 @@ import logging
 import html as h
 import re
 import tempfile
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -41,7 +42,7 @@ from archive_processor import passwords_for_source, prepare_archive
 from artifacts import bt_resource_id, game_resource_id, magnet_info_hash
 from delivery import DeliveryFailed, deliver_purchase
 from downloader import download_game_url
-from torrent_downloader import download_magnet
+from torrent_downloader import download_magnet, download_video_magnet
 from pipeline import cleanup_stale_job_dirs, process_download_job
 from uploader import UploaderUnavailable, build_telethon_uploader
 
@@ -62,6 +63,11 @@ WHOS_TV_ACCOUNTS_FILE = os.environ.get(
     'WHOS_TV_ACCOUNTS_FILE', whos_accounts.DEFAULT_ACCOUNTS_FILE)
 WHOS_TV_MIN_SIMILARITY = float(os.environ.get('WHOS_TV_MIN_SIMILARITY', '90'))
 
+UTC8 = timezone(timedelta(hours=8))
+BT_DAILY_PUSH_CHAT_ID = os.environ.get('BT_DAILY_PUSH_CHAT_ID', '-1003863698613')
+BT_DAILY_PUSH_HOUR = 21
+BT_DAILY_PUSH_ENABLED = True  # Channel admin/post permission verified via Telegram Bot API.
+
 
 def _state(user_id):
     return _user_state.setdefault(user_id, {})
@@ -72,7 +78,7 @@ def _start_text():
         '👋 欢迎！选择搜索类型：\n\n'
         '🎮 <b>黄油搜索</b> - 搜成人游戏 (Ryuugames/Otomi)，支持中英名互搜\n'
         '　未配对时按原关键词搜索，结果保留站点原标题（英文为主）\n'
-        '🔍 <b>BT搜索</b> - 搜 BT 磁力资源 (Sukebei/JavDB)\n'
+        '🔍 <b>BT搜索</b> - 搜 BT 磁力资源 (Sukebei/JavDB)，可查看今日排行或随机推荐\n'
         '📷 <b>BT 图搜</b> - Whos.tv 账号池 + Yandex 聚合识别，自动查找 BT\n\n'
         '输入关键词开始搜索，或直接发送截图~'
     )
@@ -91,6 +97,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _bt_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('🔥 今日排行', callback_data='bt_daily')],
+        [InlineKeyboardButton('🎲 随机推荐', callback_data='bt_random')],
+        [InlineKeyboardButton('↩️ 返回', callback_data='back_start')],
+    ])
+
+
 async def domain_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -100,12 +114,70 @@ async def domain_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st['domain'] = domain
     st.pop('results', None)
     st.pop('page', None)
+    st.pop('list_title', None)
+    st.pop('list_notice', None)
     name = '🎮 黄油搜索' if domain == 'ryu' else '🔍 BT搜索'
-    await q.edit_message_text(
-        f'已切换：<b>{name}</b>\n\n直接输入关键词开始搜索~',
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('↩️ 返回', callback_data='back_start')]]),
-    )
+    if domain == 'bt':
+        text = f'已切换：<b>{name}</b>\n\n输入番号搜索，或点今日排行/随机推荐~'
+        markup = _bt_menu_keyboard()
+    else:
+        text = f'已切换：<b>{name}</b>\n\n直接输入关键词开始搜索~'
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton('↩️ 返回', callback_data='back_start')]])
+    await q.edit_message_text(text, parse_mode='HTML', reply_markup=markup)
+
+
+async def bt_discovery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """今日做种数排行 / 近七天随机推荐。"""
+    q = update.callback_query
+    await q.answer()
+    action = q.data
+    if action not in ('bt_daily', 'bt_random'):
+        return
+
+    st = _state(q.from_user.id)
+    st['domain'] = 'bt'
+    st.pop('list_title', None)
+    st.pop('list_notice', None)
+    is_daily = action == 'bt_daily'
+    progress = '⏳ 正在扫描 Sukebei 今日上传并统计做种数…' if is_daily else '⏳ 正在从近 7 天上传中随机抽取…'
+    status = await q.edit_message_text(progress)
+
+    try:
+        if is_daily:
+            report = await asyncio.to_thread(search_bt.daily_ranking)
+            results = report.get('results', [])
+            title = f"🔥 今日排行 · {report.get('date', '')}"
+            notice = '按 UTC+8 当日上传筛选，按当前做种数排序（不是当日下载量或搜索热度）。'
+            if not report.get('complete', False):
+                notice += f" 扫描到上限（{report.get('scanned_pages', 0)} 页），可能未覆盖今日全部上传。"
+            empty_text = '今天暂时没有可排行的新种。'
+        else:
+            report = await asyncio.to_thread(search_bt.random_recommendation)
+            item = report.get('result')
+            results = [item] if item else []
+            title = '🎲 随机推荐 · 近 7 天上传'
+            notice = f"从近期上传中随机抽取；当前候选 {report.get('candidate_count', 0)} 条。"
+            if not report.get('complete', False):
+                notice += f" 候选池仅覆盖已扫描的 {report.get('scanned_pages', 0)} 页。"
+            empty_text = '近 7 天暂时没有可推荐的上传。'
+    except Exception as exc:
+        logger.exception('BT discovery failed mode=%s', action)
+        await status.edit_text(
+            f'❌ 获取失败：{h.escape(str(exc))}',
+            parse_mode='HTML', reply_markup=_bt_menu_keyboard(),
+        )
+        return
+
+    if not results:
+        await status.edit_text(empty_text, reply_markup=_bt_menu_keyboard())
+        return
+
+    st['results'] = results
+    st['page'] = 0
+    st['keyword'] = title
+    st['list_title'] = title
+    st['list_notice'] = notice
+    await _render_page(update, status, st)
 
 
 async def user_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -530,7 +602,160 @@ async def _download_worker(application):
             await asyncio.sleep(10)
 
 
+def _next_bt_daily_push(now=None):
+    if now is None:
+        now = datetime.now(UTC8)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=UTC8)
+    else:
+        now = now.astimezone(UTC8)
+    target = now.replace(hour=BT_DAILY_PUSH_HOUR, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return target
+
+
+def _format_daily_bt_message(report):
+    date_text = h.escape(str(report.get('date') or '未知日期'))
+    results = report.get('results') or []
+    total = int(report.get('total_today') or 0)
+    lines = [
+        f'🔥 <b>Sukebei 今日新种热榜（UTC+8 · {date_text}）</b>',
+        '按今日上传筛选，按当前做种数排序（不是当日下载量）。',
+        f'今日发现 {total} 条，展示前 {len(results)} 条。',
+        '',
+    ]
+    if not results:
+        lines.append('今日暂无新种。')
+    for index, item in enumerate(results, 1):
+        title = re.sub(r'\s+', ' ', str(item.get('title') or '?')).strip()[:160]
+        safe_title = h.escape(title)
+        url = str(item.get('url') or '')
+        if re.fullmatch(r'https://sukebei\.nyaa\.si/view/\d+', url):
+            safe_title = f'<a href="{h.escape(url, quote=True)}">{safe_title}</a>'
+        try:
+            seeders = int(item.get('seeders_count', 0) or 0)
+        except (TypeError, ValueError):
+            seeders = 0
+        lines.append(f'{index}. {safe_title} — 🌱 做种 {seeders}')
+    if not report.get('complete', False):
+        pages = int(report.get('scanned_pages') or 0)
+        lines.append(f'⚠️ 扫描到上限（{pages} 页），今日全量可能不完整。')
+    text = '\n'.join(lines)
+    if len(text) > 3900:
+        text = text[:3850].rsplit('\n', 1)[0] + '\n…'
+    return text
+
+
+def _download_daily_video(magnet: str, destination_dir: str, title: str, *, progress=None):
+    return download_video_magnet(
+        magnet, destination_dir, title, progress=progress,
+        max_bytes=int(os.environ.get('BT_MAX_BYTES', '2000000000')),
+        reserve_bytes=int(os.environ.get('BT_DISK_RESERVE_BYTES', '1073741824')),
+        timeout=int(os.environ.get('BT_DOWNLOAD_TIMEOUT', '21600')),
+    )
+
+
+async def _publish_daily_bt_video(application):
+    try:
+        bot_id = getattr(application.bot, 'id', None)
+        if bot_id is None:
+            bot_id = (await application.bot.get_me()).id
+        member = await application.bot.get_chat_member(
+            chat_id=BT_DAILY_PUSH_CHAT_ID, user_id=bot_id)
+    except Exception as exc:
+        logger.warning('[每日视频] 无法验证黄油仓库发帖权限，跳过：%s', exc)
+        return False
+
+    status = getattr(member, 'status', '')
+    can_post = (status == 'creator' or
+                (status == 'administrator' and getattr(member, 'can_post_messages', False)))
+    if not can_post:
+        logger.warning('[每日视频] bot 不是黄油仓库可发帖管理员，跳过')
+        return False
+
+    report = await asyncio.to_thread(search_bt.daily_ranking, limit=1)
+    results = report.get('results') or []
+    if not results:
+        logger.info('[每日视频] 今日排行没有候选，跳过')
+        return False
+    item = results[0]
+    if item.get('source') != 'sukebei' or not item.get('magnet'):
+        logger.warning('[每日视频] 候选不是带磁力的 Sukebei 条目，跳过')
+        return False
+
+    title = re.sub(r'\s+', ' ', str(item.get('title') or '今日推荐')).strip()[:180]
+    uploader = build_telethon_uploader()
+    work_dir = Path(os.environ.get('DOWNLOAD_DIR', str(Path(__file__).parent / 'downloads')))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='bt-daily-', dir=work_dir) as job_dir:
+        downloaded = await asyncio.to_thread(
+            _download_daily_video, item['magnet'], job_dir, title)
+        caption = f"🔥 今日视频 · {report.get('date', '')}\n{title}"
+        uploaded = await uploader.upload_video(downloaded['path'], caption=caption)
+        copied = await application.bot.copy_message(
+            chat_id=BT_DAILY_PUSH_CHAT_ID,
+            from_chat_id=uploaded['storage_chat_id'],
+            message_id=uploaded['storage_message_id'],
+        )
+    copied_chat = getattr(getattr(copied, 'chat', None), 'id', None)
+    copied_id = getattr(copied, 'message_id', None)
+    if copied_id is None or (copied_chat is not None and str(copied_chat) != str(BT_DAILY_PUSH_CHAT_ID)):
+        raise RuntimeError('Telegram copy response did not confirm the target channel message')
+    logger.info('[每日视频] Telegram 已确认频道消息：%s（message_id=%s）', title, copied_id)
+    return True
+
+
+async def _publish_daily_bt_ranking(application):
+    try:
+        bot_id = getattr(application.bot, 'id', None)
+        if bot_id is None:
+            bot_id = (await application.bot.get_me()).id
+        member = await application.bot.get_chat_member(
+            chat_id=BT_DAILY_PUSH_CHAT_ID, user_id=bot_id)
+    except Exception as exc:
+        logger.warning('[每日排行] 无法验证黄油仓库发帖权限，跳过本次：%s', exc)
+        return False
+
+    status = getattr(member, 'status', '')
+    can_post = (status == 'creator' or
+                (status == 'administrator' and getattr(member, 'can_post_messages', False)))
+    if not can_post:
+        logger.warning('[每日排行] bot 不是黄油仓库可发帖管理员，跳过本次')
+        return False
+
+    report = await asyncio.to_thread(search_bt.daily_ranking)
+    await application.bot.send_message(
+        chat_id=BT_DAILY_PUSH_CHAT_ID,
+        text=_format_daily_bt_message(report),
+        parse_mode='HTML',
+        disable_web_page_preview=True,
+    )
+    logger.info('[每日排行] 已推送到黄油仓库：%s', report.get('date'))
+    return True
+
+
+async def _daily_bt_push_loop(application):
+    while True:
+        target = _next_bt_daily_push()
+        delay = max(0.0, (target - datetime.now(UTC8)).total_seconds())
+        logger.info('[每日视频] 已设定每日 UTC+8 %02d:00；下次 %s',
+                    BT_DAILY_PUSH_HOUR, target.isoformat())
+        await asyncio.sleep(delay)
+        try:
+            await _publish_daily_bt_video(application)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception('[每日视频] 本次推送失败')
+
+
 async def _post_init(application):
+    if BT_DAILY_PUSH_ENABLED:
+        application.bot_data['bt_daily_push_task'] = asyncio.create_task(
+            _daily_bt_push_loop(application))
+    else:
+        logger.info('[每日视频] 定时推送已暂停；等待 Telegram 发帖权限核验')
     if OKPAY_SHOP_ID and OKPAY_API_KEY:
         application.bot_data['payment_poll_task'] = asyncio.create_task(_poll_payments(application))
     if _delivery_configured():
@@ -540,7 +765,7 @@ async def _post_init(application):
 
 
 async def _post_shutdown(application):
-    for key in ('payment_poll_task', 'download_task'):
+    for key in ('payment_poll_task', 'download_task', 'bt_daily_push_task'):
         task = application.bot_data.get(key)
         if task:
             task.cancel()
@@ -656,6 +881,8 @@ async def do_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await _handle_topup_message(update, context, amount)
         return
+    st.pop('list_title', None)
+    st.pop('list_notice', None)
     domain = st.get('domain', 'ryu')
 
     status = await update.message.reply_text('🔎 搜索中…')
@@ -782,7 +1009,15 @@ async def _render_page(update, status_msg, st):
     page_items = results[start:end]
     total_pages = (len(results) + per_page - 1) // per_page
 
-    lines = [f'🔎 <b>"{h.escape(kw)}"</b> 搜索结果 ({len(results)} 条) - 第{page + 1}/{total_pages}页\n']
+    list_title = st.get('list_title')
+    if list_title:
+        lines = [f'<b>{h.escape(list_title)}</b> ({len(results)} 条) - 第{page + 1}/{total_pages}页']
+        notice = st.get('list_notice')
+        if notice:
+            lines.append(h.escape(notice))
+        lines.append('')
+    else:
+        lines = [f'🔎 <b>"{h.escape(kw)}"</b> 搜索结果 ({len(results)} 条) - 第{page + 1}/{total_pages}页\n']
     btns = []
 
     for i, item in enumerate(page_items):
@@ -956,7 +1191,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '2. 输入关键词搜索，结果列表点选\n'
         '3. 点结果查看详情（带封面图+简介）\n'
         '4. 黄油：中英名按作品关联互搜；未配对按原词搜并保留站点原标题；下载按钮直达镜像\n'
-        '   BT：磁力一键复制\n'
+        '   BT：输入番号搜索，或点今日做种数排行/近 7 天随机推荐；磁力一键复制\n'
         '5. BT 图搜：Whos.tv 账号池与 Yandex 聚合识别，自动搜索 BT\n'
         '6. /topup 金额：创建 USDT 充值订单\n\n'
         '💡 提示：BT 搜索直接输入番号 (如 MIDV-726) 更快~',
@@ -982,6 +1217,7 @@ def main():
     app.add_handler(CallbackQueryHandler(check_topup, pattern='^checkpay_'))
     app.add_handler(CallbackQueryHandler(buy_download, pattern='^buy_'))
     app.add_handler(CallbackQueryHandler(domain_select, pattern='^domain_'))
+    app.add_handler(CallbackQueryHandler(bt_discovery, pattern='^bt_(daily|random)$'))
     app.add_handler(CallbackQueryHandler(back_start, pattern='^back_start$'))
     app.add_handler(CallbackQueryHandler(page_nav, pattern='^page_'))
     app.add_handler(CallbackQueryHandler(pick_item, pattern='^pick_'))
