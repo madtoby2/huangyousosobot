@@ -423,6 +423,8 @@ def _create_topup_checkout(tg_user_id, amount, store, client, public_base_url):
 
 async def wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    # Leaving the top-up prompt (including its cancel button) restores normal input routing.
+    _state(user_id).pop('awaiting_topup', None)
     text = (f'💰 <b>我的钱包</b>\n\n可用余额：'
             f'<b>{format_balance(_wallet_store.get_balance_units(user_id))} USDT</b>\n\n'
             '充值到账后可用于付费资源。')

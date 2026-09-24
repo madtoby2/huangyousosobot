@@ -5,8 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from bot import (_create_topup_checkout, _parse_topup_amount, _wallet_keyboard,
-                 format_balance, start, topup_cmd)
+from bot import (_create_topup_checkout, _parse_topup_amount, _state, _wallet_keyboard,
+                 format_balance, start, topup_cmd, wallet_cmd)
 from wallet_store import WalletStore
 
 
@@ -91,6 +91,26 @@ class WalletBotTests(unittest.IsolatedAsyncioTestCase):
         await topup_cmd(update, context)
 
         self.assertIn('金额无效', message.reply_text.await_args.args[0])
+
+
+    async def test_wallet_entry_clears_stale_topup_prompt(self):
+        user_id = 987657
+        _state(user_id)['awaiting_topup'] = True
+        query = SimpleNamespace(
+            from_user=SimpleNamespace(id=user_id),
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=user_id),
+            callback_query=query,
+            message=None,
+        )
+
+        await wallet_cmd(update, None)
+
+        self.assertNotIn('awaiting_topup', _state(user_id))
+        query.edit_message_text.assert_awaited_once()
 
 
 if __name__ == '__main__':
